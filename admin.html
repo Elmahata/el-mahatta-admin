@@ -38,6 +38,7 @@
       <button role="tab" id="tab-live" aria-selected="false">المشاوير <span id="badge"></span></button>
       <button role="tab" id="tab-drivers" aria-selected="false">السائقون <span id="joinBadge"></span></button>
       <button role="tab" id="tab-reports" aria-selected="false">البلاغات <span id="repBadge"></span></button>
+      <button role="tab" id="tab-price" aria-selected="false">التسعير</button>
       <button role="tab" id="tab-zones" aria-selected="false">المناطق</button>
       <button role="tab" id="tab-places" aria-selected="false">نقاط الركوب</button>
       <button role="tab" id="tab-admin" aria-selected="false">المتابعة</button>
@@ -171,6 +172,38 @@
     <div id="driverList"></div>
   </section>
 
+  <!-- التسعير -->
+  <section id="p-price" class="stack" hidden>
+    <div class="card">
+      <h2>جوه كفر صقر — سعر ثابت</h2>
+      <p class="hint">المسافة بتتحسب بالشوارع تقريباً (الخط المستقيم × ١٫٣).</p>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label for="pSame">مشوار قصير (ج)</label><input id="pSame" type="number" min="0" step="1" inputmode="numeric"></div>
+        <div class="field"><label for="pCross">مشوار طويل (ج)</label><input id="pCross" type="number" min="0" step="1" inputmode="numeric"></div>
+        <div class="field"><label for="pCut">الحد بين القصير والطويل (كم)</label><input id="pCut" type="number" min="0.5" step="0.1" inputmode="decimal"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>برا كفر صقر — بالكيلو</h2>
+      <p class="hint">لو مكان الركوب أو الوجهة بعيد عن أقرب مكان معروف في المدينة بالمسافة دي، المشوار بيتحسب بالكيلو، والمجموع بيتقرّب لفوق لأقرب ٥ ج. وعمره ما يقل عن سعر المشوار الطويل.</p>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label for="pPerKm">سعر الكيلو (ج)</label><input id="pPerKm" type="number" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label for="pOutKm">يعتبر برا المدينة لو أبعد من (كم)</label><input id="pOutKm" type="number" min="0.5" step="0.1" inputmode="decimal"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>جرّب السعر</h2>
+      <div class="row" style="margin-top:10px;align-items:end">
+        <div class="field"><label for="pTryKm">مسافة المشوار (كم)</label><input id="pTryKm" type="number" min="0" step="0.1" value="6" inputmode="decimal"></div>
+        <div class="field"><label for="pTryOut">المكان</label><select id="pTryOut"><option value="0">جوه كفر صقر</option><option value="1" selected>برا كفر صقر</option></select></div>
+      </div>
+      <div class="banner b-note" id="pTryRes" style="margin-top:6px"></div>
+      <div id="pExamples" style="margin-top:10px"></div>
+    </div>
+    <div class="banner b-warn"><span>⚠</span><span>السعر الجديد بيتطبّق على الطلبات الجديدة بس. والمناطق اللي ليها سعر خاص في تبويب «المناطق» بتفضل بسعرها.</span></div>
+    <button class="btn btn-primary btn-wide" id="pSave" type="button">حفظ التسعير</button>
+  </section>
+
   <!-- المناطق -->
   <section id="p-zones" class="stack" hidden>
     <div class="banner b-note">
@@ -201,7 +234,7 @@
         <button class="btn btn-ghost" id="addPlace">إضافة</button>
       </div>
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px">
-        <button class="btn btn-primary" id="seedPlaces" type="button">أضف أماكن كفر صقر المشهورة وحدد مكانها</button>
+        <button class="btn btn-primary" id="seedPlaces" type="button">أضف وجهات كفر صقر (١٧٨) وحدد مكانها</button>
         <button class="btn btn-ghost" id="poiLoad" type="button">اقتراحات من الخريطة</button>
       </div>
       <div class="banner b-warn" id="placeMiss" hidden style="margin-top:10px"></div>
@@ -254,8 +287,7 @@
     <div class="card">
       <h2>إعدادات التسعير</h2>
       <div class="row" style="margin-top:12px">
-        <div class="field"><label for="cSame">مشوار قصير — لحد ٢ كم (ج)</label><input id="cSame" type="number" min="0" step="1" value="10"></div>
-        <div class="field"><label for="cCross">مشوار طويل — أكتر من ٢ كم (ج)</label><input id="cCross" type="number" min="0" step="1" value="15"></div>
+        <p class="hint" style="margin:0">أسعار المشاوير بقت في تبويب <b>«التسعير»</b>.</p>
       </div>
       <div class="banner b-note" style="margin-bottom:12px"><span>★</span><span><b>المحطة مجانية بالكامل</b> — مفيش اشتراك ولا عمولة على السواقين. الراكب بيدفع الأجرة بس، كاش للسائق.</span></div>
       <div hidden>
@@ -380,7 +412,7 @@
     setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
   });
 
-  var tabs = ["dash","live","drivers","reports","zones","places","admin"];
+  var tabs = ["dash","live","drivers","reports","price","zones","places","admin"];
   tabs.forEach(function(t){
     $("tab-"+t).addEventListener("click", function(){
       tabs.forEach(function(o){ $("tab-"+o).setAttribute("aria-selected", String(o===t)); $("p-"+o).hidden = (o!==t); });
@@ -537,13 +569,53 @@
 
   var PCATS = { transport:"مواصلات", health:"صحة", gov:"جهات حكومية", edu:"تعليم", public:"أماكن عامة", market:"أسواق ومحلات", village:"القرى", other:"تانيين" };
   /* أماكن مقترحة لكفر صقر — بتتضاف من غير مكان، وإنت بتحدد مكانها على الخريطة. الراكب مش بيشوفها غير بعد ما تتحدد */
+  /* قائمة وجهات كفر صقر (١٧٨ مكان) من ملف الإدارة — بتتضاف من غير إحداثيات، والراكب مش بيشوف المكان غير بعد تحديده على الخريطة */
   var STARTER = [
-    ["محطة قطار كفر صقر","transport"],["ميدان المزلقان (وسط البلد)","transport"],["موقف الميكروباص","transport"],["كوبري بحر مويس","transport"],
-    ["مستشفى كفر صقر المركزي","health"],
-    ["مجلس مدينة كفر صقر","gov"],["مركز شرطة كفر صقر","gov"],["هندسة الري","gov"],["مكتب البريد","gov"],
-    ["مدرسة كفر صقر الثانوية بنين","edu"],["المعهد العالي للخدمة الاجتماعية","edu"],
-    ["مركز شباب كفر صقر","public"],["الجامع الكبير","public"],["شارع البحر","public"],
-    ["السوق","market"]
+    ["محطة قطار كفر صقر","transport"],["موقف الزقازيق وفاقوس وأبو كبير","transport"],["موقف القاهرة والمنصورة","transport"],["مستشفى كفر صقر المركزي","health"],
+    ["موقف أولاد صقر","transport"],["موقف سنجها القديم","transport"],["مدرسة كفر صقر الثانوية بنات","edu"],["مدرسة كفر صقر الثانوية بنين الجديدة","edu"],
+    ["مدرسة كفر صقر الإعدادية بنين","edu"],["مدرسة كفر صقر الإعدادية بنات","edu"],["مدرسة كفر صقر الرسمية للغات","edu"],["كوبري السوق","public"],
+    ["كوبري عامر","public"],["سوق الاثنين","market"],["الساحة الشعبية – مركز الشباب","public"],["نادي كفر صقر الرياضي","public"],
+    ["السجل المدني","gov"],["مجلس مدينة كفر صقر","gov"],["محكمة كفر صقر","gov"],["مكتب بريد كفر صقر","gov"],
+    ["البنك الأهلي المصري","gov"],["بنك مصر","gov"],["مستشفى ميدكير","health"],["مستشفى ابن سينا التخصصي","health"],
+    ["مستشفى العبور","health"],["مستشفى الزهراء التخصصي","health"],["المركز الطبي بكفر صقر","health"],["مدرسة جمال عبد الناصر الابتدائية","edu"],
+    ["مدرسة صلاح سالم الابتدائية","edu"],["مدرسة السادات الإعدادية بنين","edu"],["مدرسة كفر صقر الجديدة للتعليم الأساسي","edu"],["مدرسة الإمام علي الابتدائية","edu"],
+    ["مدرسة كفر صقر التجارية بنين","edu"],["مدرسة كفر صقر الثانوية بنين القديمة","edu"],["مدرسة كفر صقر الثانوية الزراعية","edu"],["سنتر المستقبل","edu"],
+    ["سنتر العميد","edu"],["أكاديمية نوت كورسز","edu"],["سنتر التفوق","edu"],["سنتر الأوائل","edu"],
+    ["معهد المهندس للحاسب الآلي واللغات","edu"],["مركز ومكتبة هنا","edu"],["مكتبة همس","edu"],["مكتبة الجندي","edu"],
+    ["مكتبة الجزيرة","edu"],["مكتبة القدس","edu"],["مكتبة الإسكندرية","edu"],["برج القط","public"],
+    ["جراب الحاوي","public"],["ممر أميرة","public"],["فودافون – فرع البحر","gov"],["فودافون – فرع شارع المستشفى","gov"],
+    ["اتصالات – فرع شارع المستشفى","gov"],["إدارة كفر صقر التعليمية","gov"],["مركز شرطة كفر صقر","gov"],["إدارة مرور كفر صقر","gov"],
+    ["مكتب جوازات كفر صقر","gov"],["مكتب العمل","gov"],["سنترال كفر صقر","public"],["مزلقان السكة الحديد بكفر صقر","transport"],
+    ["موقف سيارات القرى داخل المدينة","transport"],["وحدة مطافئ كفر صقر","gov"],["منفذ أمان – الساحة الشعبية","market"],["مكتب الإسكان البديل – محطة القطار","gov"],
+    ["مدخل محطة القطار ناحية حي النهضة","transport"],["مدخل محطة القطار ناحية النادي","transport"],["سوق منسي","market"],["معامل البرج – برج الشوبكي","health"],
+    ["معمل ألفا 2","health"],["معمل د. يحيى الألفي","health"],["معمل سيجما","health"],["مركز الحمد الطبي","health"],
+    ["مركز الشفاء","health"],["مركز المنصور الطبي","health"],["مركز السلام للعلاج الطبيعي","health"],["مركز الشناوي للعلاج الطبيعي","health"],
+    ["مركز المنصور للعلاج الطبيعي","health"],["مركز الرحمة للعلاج الطبيعي","health"],["مركز دار الطب التخصصية","health"],["مركز النور للأشعة","health"],
+    ["مركز الإيمان للأشعة","health"],["مركز المختار للأشعة","health"],["مركز المصطفى للأشعة","health"],["مركز كفر صقر للأشعة","health"],
+    ["عيادة د. محمد الفداوي للقلب والإيكو","health"],["عيادة د. أيمن سالم – ممر أميرة","health"],["صيدليات الوفاء – فرع المستشفى","health"],["صيدلية الشعراوي الجديدة","health"],
+    ["صيدلية د. شيماء","health"],["صيدلية الهلال","health"],["صيدلية صدقي – البحر","health"],["صيدلية المدينة","health"],
+    ["صيدلية ندا","health"],["صيدلية الحكمة الجديدة","health"],["صيدلية الحياة","health"],["صيدلية السلام","health"],
+    ["هايبر أسواق المدينة","market"],["أبو العينين ماركت","market"],["أولاد منصور ماركت","market"],["أحمد حمدي ماركت","market"],
+    ["سوبر ماركت المدينة المنورة","market"],["سوبر ماركت المصطفى","market"],["سوبر ماركت بني سعد","market"],["سوبر ماركت بهلول","market"],
+    ["أولاد عثمان للأجهزة المنزلية","market"],["معرض ما يغلاش عليك","market"],["مطعم كشري المماليك","market"],["مطعم ابن البلد","market"],
+    ["مطعم كريب كورنر","market"],["مطعم مايسترو","market"],["مطعم أسماك تبارك","market"],["مطعم أسماك الطيب","market"],
+    ["مطعم استاكوزا","market"],["مطعم دودجرز","market"],["مطعم بيانكو","market"],["مطعم حاج علي","market"],
+    ["مطعم توفيق","market"],["مطعم بروست","market"],["مخبز أولاد العناني","market"],["قاعة رويال فيلا للأفراح","public"],
+    ["قصر الماسة للأفراح","public"],["القاعة الملكية للأفراح","public"],["كافيه بريك","market"],["كافيه وسط البلد","market"],
+    ["محلات أبو النادي للبن","market"],["محلات طاهر ستورز","market"],["مصوغات ومجوهرات العناني","market"],["محلات نيولوك الفهد للملابس","market"],
+    ["معرض الحرمين للدهانات","market"],["جيم الأبطال","public"],["جيم الصعيدي","public"],["جيم قمر","public"],
+    ["نادي الصافوري","public"],["أكاديمية المستقبل","edu"],["صيدلية الحديثة","health"],["صيدلية الشوربجي","health"],
+    ["صيدلية د. أيمن","health"],["صيدلية د. محمد رضا","health"],["صيدلية د. محمود أمين","health"],["صيدلية كير – كفر صقر","health"],
+    ["روزان للأجهزة الطبية","health"],["الشروق ميديكال","health"],["عيادة د. أحمد جويفل","health"],["عيادة د. عبد الرحمن صبور","health"],
+    ["عيادة د. محمد طه","health"],["عيادة د. هشام عوني","health"],["عيادة د. عبدالله الإسكندراني","health"],["عيادة د. محمد عثمان العوضي","health"],
+    ["عيادة د. سميرة سعيد","health"],["عيادة د. سعيد الديب","health"],["عيادة د. أحمد طه","health"],["عيادة د. أحمد أبو زيد التهامي","health"],
+    ["عيادة د. أمين صالح","health"],["عيادة د. أحمد محمود حسن","health"],["عيادة د. عاطف سليمان","health"],["عيادة د. محمود الأشقر","health"],
+    ["عيادة د. إيهاب السيد عبد الحميد","health"],["عيادة د. أحمد عبد الرحمن","health"],["عيادة د. أحمد خالد أبو زيد","health"],["عيادة د. محمد عصمت","health"],
+    ["عيادة د. يسري الألفي","health"],["عيادة د. أشرف منصور","health"],["عيادة د. علاء وهبي","health"],["عيادة د. علاء فرج","health"],
+    ["عيادة د. أحمد يحيى إبراهيم","health"],["عيادة د. إيمان صلاح","health"],["عيادة د. خالد محمد غريب","health"],["عيادة د. عمر ثروت","health"],
+    ["عيادة د. يوسف محمد يوسف","health"],["عيادة د. أحمد عبد الناصر بكر","health"],["عيادة د. إسلام علاء وهبة","health"],["عيادة د. أحمد حمدي","health"],
+    ["أكاديمية المثلث التعليمية – سنتر المثلث","edu"],["سنتر ماهر سعيد التعليمي","edu"],["أكاديمية بهجة","edu"],["عيادة الدكتور صلاح منصور","health"],
+    ["أكاديمية سمارت هاوس – حضانة","edu"],["حضانة بسمة أمل","edu"]
   ];
   function renderPlaces(){
     var miss = S.places.filter(function(p){ return p.lat == null; }).length;
@@ -565,6 +637,8 @@
         + '</select></div>'
         + '<div class="actions">'
         + '<button class="btn btn-'+(selPlace===p.id?"primary":"ghost")+' btn-sm" data-sel="'+TT.esc(p.id)+'">'+(selPlace===p.id?"جارٍ التحديد…":"حدّد على الخريطة")+'</button>'
+        + (has ? '' : '<a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(p.name+'، كفر صقر، الشرقية')+'">دوّر في جوجل ماب</a>')
+        + '<button class="btn btn-ghost btn-sm" data-pastep="'+TT.esc(p.id)+'">الصق الإحداثيات</button>'
         + '<button class="btn btn-ghost btn-sm" data-renp="'+TT.esc(p.id)+'">إعادة تسمية</button>'
         + '<button class="btn btn-ghost btn-sm" data-delp="'+TT.esc(p.id)+'">حذف</button>'
         + '</div></div>';
@@ -736,7 +810,7 @@
 
   function renderAll(){
     $("farePill").textContent = S.cfg.same + "–" + S.cfg.cross + " ج";
-    $("cSame").value = S.cfg.same; $("cCross").value = S.cfg.cross;
+    renderPrice();
     if(document.activeElement !== $("cPaidFrom")) $("cPaidFrom").value = S.cfg.paidFrom || "";
     if(document.activeElement !== $("cWeek")) $("cWeek").value = S.cfg.week;
     if(document.activeElement !== $("cMonth")) $("cMonth").value = S.cfg.month;
@@ -929,7 +1003,7 @@
   function load(){
     return api("state").then(function(raw){
       var s = TT.shape(raw);
-      S.zones = s.zones; S.places = s.places; S.drivers = raw.drivers || []; S.requests = s.requests; S.cfg = s.cfg; S.reports = raw.reports || []; S.riders = raw.riders || []; S.joins = (raw.joins || []).sort(function(a,b){ return (b.createdAt||0) - (a.createdAt||0); });
+      S.zones = s.zones; S.places = s.places; S.drivers = raw.drivers || []; S.requests = s.requests; S.cfg = s.cfg; S.cfgRaw = (raw.config || []).filter(function(c){ return c.id === "pricing"; })[0] || {}; S.reports = raw.reports || []; S.riders = raw.riders || []; S.joins = (raw.joins || []).sort(function(a,b){ return (b.createdAt||0) - (a.createdAt||0); });
       renderAll(); renderJoins();
     }).catch(function(e){
       if(e.status === 401){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} location.reload(); }
@@ -1026,7 +1100,7 @@
       var found = 0, i = 0;
       function next(){
         if(i >= todo.length){
-          b.disabled = false; b.textContent = "أضف أماكن كفر صقر المشهورة وحدد مكانها";
+          b.disabled = false; b.textContent = "أضف وجهات كفر صقر (١٧٨) وحدد مكانها";
           TT.toast("اتحدد مكان " + found + " من " + todo.length + (todo.length - found ? " — الباقي حدده بإيدك" : " ✓"));
           return;
         }
@@ -1036,7 +1110,7 @@
         }).catch(function(){}).then(function(){ setTimeout(next, 1100); });
       }
       next();
-    }).catch(function(e){ b.disabled = false; b.textContent = "أضف أماكن كفر صقر المشهورة وحدد مكانها"; TT.toast(e.message || "حصلت مشكلة"); });
+    }).catch(function(e){ b.disabled = false; b.textContent = "أضف وجهات كفر صقر (١٧٨) وحدد مكانها"; TT.toast(e.message || "حصلت مشكلة"); });
   });
   var POI = [];
   var KIND = { hospital:"مستشفى", clinic:"عيادة", pharmacy:"صيدلية", school:"مدرسة", college:"كلية", university:"جامعة", place_of_worship:"جامع / كنيسة", bank:"بنك", post_office:"بريد", police:"شرطة", townhall:"مجلس المدينة", marketplace:"سوق", station:"محطة قطار", bus_station:"موقف", fuel:"بنزينة", cafe:"كافيه", restaurant:"مطعم", government:"جهة حكومية" };
@@ -1086,10 +1160,41 @@
     TT.toast("دوس «حفظ» علشان يتسجّل");
   });
 
+  /* ---------- التسعير ---------- */
+  function pVals(){
+    var n = function(id, d){ var v = parseFloat($(id).value); return isNaN(v) ? d : v; };
+    return { same: Math.round(n("pSame", S.cfg.same)), cross: Math.round(n("pCross", S.cfg.cross)), cutKm: n("pCut", S.cfg.cutKm), outPerKm: n("pPerKm", S.cfg.outPerKm), outKm: n("pOutKm", S.cfg.outKm) };
+  }
+  function pFare(v, km, out){ if(out) return Math.max(v.cross, Math.ceil((km * v.outPerKm - 1e-9) / 5) * 5); return km <= v.cutKm ? v.same : v.cross; }
+  function pRender(){
+    var v = pVals(), km = parseFloat($("pTryKm").value) || 0, out = $("pTryOut").value === "1";
+    var f = pFare(v, km, out);
+    $("pTryRes").innerHTML = '<span>◆</span><span>' + (out
+      ? km + ' كم × ' + v.outPerKm + ' ج = ' + (Math.round(km * v.outPerKm * 100) / 100) + ' ج ← <b>' + f + ' ج</b>'
+      : (km <= v.cutKm ? 'مشوار قصير (لحد ' + v.cutKm + ' كم)' : 'مشوار طويل (أكتر من ' + v.cutKm + ' كم)') + ' ← <b>' + f + ' ج</b>') + '</span>';
+    var ex = [3, 5, 8, 10, 15, 20];
+    $("pExamples").innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13.5px"><thead><tr><th style="text-align:start;padding:6px;border-bottom:1px solid var(--line)">برا المدينة</th>' + ex.map(function(k){ return '<th class="num" style="padding:6px;border-bottom:1px solid var(--line)">' + k + ' كم</th>'; }).join("") + '</tr></thead><tbody><tr><td style="padding:6px;color:var(--muted)">الأجرة</td>' + ex.map(function(k){ return '<td class="num" style="padding:6px;text-align:center;font-weight:700">' + pFare(v, k, true) + ' ج</td>'; }).join("") + '</tr></tbody></table>';
+  }
+  function renderPrice(){
+    [["pSame", S.cfg.same], ["pCross", S.cfg.cross], ["pCut", S.cfg.cutKm], ["pPerKm", S.cfg.outPerKm], ["pOutKm", S.cfg.outKm]].forEach(function(x){ if(document.activeElement !== $(x[0]) && !$(x[0]).dataset.dirty) $(x[0]).value = x[1]; });
+    pRender();
+  }
+  ["pSame","pCross","pCut","pPerKm","pOutKm","pTryKm","pTryOut"].forEach(function(id){ $(id).addEventListener("input", function(){ if(id.indexOf("pTry") !== 0) $(id).dataset.dirty = "1"; pRender(); }); });
+  $("pSave").addEventListener("click", function(){
+    var v = pVals();
+    if(!(v.same > 0 && v.cross > 0 && v.cutKm > 0 && v.outPerKm > 0 && v.outKm > 0)){ TT.toast("كل الخانات لازم تبقى أكبر من صفر"); return; }
+    if(v.cross < v.same && !confirm("سعر المشوار الطويل أقل من القصير. أكمّل؟")) return;
+    if(!confirm("هتحفظ التسعير الجديد:\nقصير " + v.same + " ج · طويل " + v.cross + " ج (الحد " + v.cutKm + " كم)\nبرا المدينة " + v.outPerKm + " ج/كم (أبعد من " + v.outKm + " كم)")) return;
+    var btn = this; btn.disabled = true;
+    save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing" }, v)).then(function(){
+      ["pSame","pCross","pCut","pPerKm","pOutKm"].forEach(function(id){ delete $(id).dataset.dirty; });
+      btn.disabled = false; btn.textContent = "اتحفظ ✓"; setTimeout(function(){ btn.textContent = "حفظ التسعير"; }, 1600);
+    }).catch(function(e){ btn.disabled = false; TT.toast(e.message || "حصلت مشكلة"); });
+  });
+
   $("saveCfg").addEventListener("click", function(){
-    var a = parseInt($("cSame").value,10), b2 = parseInt($("cCross").value,10);
     var w = parseInt($("cWeek").value,10), m = parseInt($("cMonth").value,10), g = parseInt($("cGrace").value,10);
-    var body = { id:"pricing", same: isNaN(a)?15:a, cross: isNaN(b2)?20:b2, paidFrom: $("cPaidFrom").value || "", week: isNaN(w)?30:w, month: isNaN(m)?100:m, grace: isNaN(g)?3:g, adminPhone: $("cAdminPhone").value.replace(/\D/g,"") };
+    var body = Object.assign(clone(S.cfgRaw || {}), { id:"pricing", paidFrom: $("cPaidFrom").value || "", week: isNaN(w)?30:w, month: isNaN(m)?100:m, grace: isNaN(g)?3:g, adminPhone: $("cAdminPhone").value.replace(/\D/g,"") });
     var tf = parseFloat($("cTripFee").value);
     var on = $("cCreditPaused").checked;
     if(on && !S.cfg.creditOn && !confirm("هتشغّل نظام الرصيد؟\nكل راكب وسائق هياخد ٩٠ يوم مجاني من النهارده، وبعدها لازم يشحن. بلّغ الناس قبلها.")){ $("cCreditPaused").checked = false; return; }
@@ -1170,6 +1275,15 @@
       c.name = zn.trim(); save("zones", id, c);
     } else if((id = el.getAttribute("data-delp"))){
       if(confirm("حذف النقطة؟")) del("places", id);
+    } else if((id = el.getAttribute("data-pastep"))){
+      /* من جوجل ماب: كليك يمين على المكان ← دوس على الأرقام اللي فوق (بتتنسخ) ← الصقها هنا */
+      var raw = prompt("الصق الإحداثيات من جوجل ماب (مثال: 30.79639, 31.62611):", ""); if(!raw) return;
+      var m = String(raw).replace(/[٠-٩]/g, function(d){ return "٠١٢٣٤٥٦٧٨٩".indexOf(d); }).match(/(-?\d{1,2}\.\d+)\s*[,،\s]\s*(-?\d{1,3}\.\d+)/);
+      if(!m){ TT.toast("الأرقام مش مفهومة — انسخها من جوجل ماب زي ما هي"); return; }
+      var la = +m[1], ln = +m[2];
+      if(TT.dist({ lat:la, lng:ln }, { lat:TT.CENTER[0], lng:TT.CENTER[1] }) > 6 && !confirm("المكان ده بعيد عن كفر صقر بأكتر من ٦ كم. أكمّل؟")) return;
+      c = clone(TT.byId(S.places,id)); c.lat = +la.toFixed(6); c.lng = +ln.toFixed(6); delete c.auto;
+      save("places", id, c).then(function(){ TT.toast("اتسجّلت ✓"); if(pmap) pmap.setView([la, ln], 17); });
     } else if((id = el.getAttribute("data-renp"))){
       c = clone(TT.byId(S.places,id)); var pn = prompt("الاسم الجديد:", c.name); if(!pn) return;
       c.name = pn.trim(); save("places", id, c);
