@@ -135,6 +135,8 @@
           same: cfgDoc && cfgDoc.same != null ? cfgDoc.same : 10,
           cross: cfgDoc && cfgDoc.cross != null ? cfgDoc.cross : 15,
           cutKm: cfgDoc && +cfgDoc.cutKm > 0 ? +cfgDoc.cutKm : 2,
+          outKm: cfgDoc && +cfgDoc.outKm > 0 ? +cfgDoc.outKm : 1.5,
+          outPerKm: cfgDoc && +cfgDoc.outPerKm > 0 ? +cfgDoc.outPerKm : 7.5,
           sub: cfgDoc && cfgDoc.sub != null ? cfgDoc.sub : 200,
           freeUntil: (cfgDoc && cfgDoc.freeUntil) || "",
           paidFrom: (cfgDoc && cfgDoc.paidFrom) || "",
