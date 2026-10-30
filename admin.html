@@ -39,6 +39,7 @@
       <button role="tab" id="tab-drivers" aria-selected="false">السائقون <span id="joinBadge"></span></button>
       <button role="tab" id="tab-reports" aria-selected="false">البلاغات <span id="repBadge"></span></button>
       <button role="tab" id="tab-price" aria-selected="false">التسعير</button>
+      <button role="tab" id="tab-ai" aria-selected="false">المساعد</button>
       <button role="tab" id="tab-zones" aria-selected="false">المناطق</button>
       <button role="tab" id="tab-places" aria-selected="false">نقاط الركوب</button>
       <button role="tab" id="tab-admin" aria-selected="false">المتابعة</button>
@@ -172,6 +173,26 @@
     <div id="driverList"></div>
   </section>
 
+  <!-- المساعد -->
+  <section id="p-ai" class="stack" hidden>
+    <div class="card">
+      <h2>مساعد الإدارة</h2>
+      <p class="hint">اسأله عن المشاوير والسواقين والبلاغات، أو اطلب منه يغيّر التسعير. أي تغيير مابيتنفذش غير لما تدوس «موافق». مابيشوفش أسامي الركاب ولا أرقامهم.</p>
+      <div id="aiSug" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+        <button class="btn btn-ghost btn-sm" type="button" data-aiq="لخّصلي النهارده: كام مشوار خلص واتلغى وليه">ملخص النهارده</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-aiq="مين أكتر سواق شغال الشهر ده، ومين محتاج متابعة؟">السواقين</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-aiq="لخّصلي البلاغات المفتوحة وقولّي أبدأ بإيه">البلاغات</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-aiq="إيه أكتر الأماكن والساعات اللي عليها طلب؟">أوقات الزحمة</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-aiq="هل التسعير الحالي مناسب؟ اقترح تعديل لو محتاج">راجع التسعير</button>
+      </div>
+    </div>
+    <div class="card" id="aiLog" style="display:flex;flex-direction:column;gap:10px;min-height:120px"><p class="hint" id="aiEmpty" style="margin:0">اكتب سؤالك تحت، أو اختار من فوق.</p></div>
+    <div style="display:flex;gap:8px">
+      <textarea id="aiIn" rows="2" placeholder="مثلاً: خلّي الكيلو برا المدينة ٨ ج" style="flex:1;resize:vertical"></textarea>
+      <button class="btn btn-primary" id="aiSend" type="button">ابعت</button>
+    </div>
+  </section>
+
   <!-- التسعير -->
   <section id="p-price" class="stack" hidden>
     <div class="card">
@@ -235,6 +256,7 @@
       </div>
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px">
         <button class="btn btn-primary" id="seedPlaces" type="button">أضف وجهات كفر صقر (١٧٨) وحدد مكانها</button>
+        <label class="btn btn-ghost" id="placesFileBtn" style="cursor:pointer"><span id="placesFileTxt">ارفع ملف أماكن (Excel أو CSV)</span><input id="placesFile" type="file" accept=".xlsx,.csv,.txt" hidden></label>
         <button class="btn btn-ghost" id="poiLoad" type="button">اقتراحات من الخريطة</button>
       </div>
       <div class="banner b-warn" id="placeMiss" hidden style="margin-top:10px"></div>
@@ -412,7 +434,46 @@
     setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
   });
 
-  var tabs = ["dash","live","drivers","reports","price","zones","places","admin"];
+  /* ---------- المساعد (AI) ---------- */
+  var aiMsgs = [];
+  function aiBubble(role, html){
+    $("aiEmpty").hidden = true;
+    var d = document.createElement("div");
+    d.style.cssText = "max-width:92%;padding:10px 12px;border-radius:14px;white-space:pre-wrap;line-height:1.7;" + (role === "user" ? "align-self:flex-start;background:var(--accent);color:#fff" : "align-self:flex-end;background:var(--surface);border:1px solid var(--line)");
+    d.innerHTML = html; $("aiLog").appendChild(d); return d;
+  }
+  function aiProposal(p){
+    var rows = [], names = { same:"مشوار قصير", cross:"مشوار طويل", cutKm:"الحد بين القصير والطويل (كم)", outPerKm:"الكيلو برا المدينة", outKm:"برا المدينة لو أبعد من (كم)" };
+    if(p.pricing) Object.keys(p.pricing).forEach(function(k){ rows.push(names[k] + ": " + (S.cfg[k] ?? "—") + " ← <b>" + p.pricing[k] + "</b>"); });
+    (p.zones || []).forEach(function(z){ var o = TT.byId(S.zones, z.id) || {}; if(z.same != null) rows.push("منطقة " + TT.esc(z.name) + " قصير: " + (o.same ?? "—") + " ← <b>" + z.same + "</b>"); if(z.cross != null) rows.push("منطقة " + TT.esc(z.name) + " طويل: " + (o.cross ?? "—") + " ← <b>" + z.cross + "</b>"); });
+    var box = aiBubble("assistant", '<b>اقتراح تغيير</b><br>' + TT.esc(p.summary || "") + '<div style="margin:8px 0">' + rows.join("<br>") + '</div><div style="display:flex;gap:8px"><button class="btn btn-primary btn-sm" type="button">موافق — نفّذ</button><button class="btn btn-ghost btn-sm" type="button">لأ</button></div>');
+    var bs = box.querySelectorAll("button");
+    bs[1].onclick = function(){ bs[0].disabled = bs[1].disabled = true; bs[1].textContent = "اتلغى"; };
+    bs[0].onclick = function(){
+      bs[0].disabled = bs[1].disabled = true;
+      var jobs = [];
+      if(p.pricing) jobs.push(function(){ return save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing", same:S.cfg.same, cross:S.cfg.cross, cutKm:S.cfg.cutKm, outPerKm:S.cfg.outPerKm, outKm:S.cfg.outKm }, p.pricing)); });
+      (p.zones || []).forEach(function(z){ jobs.push(function(){ var c = clone(TT.byId(S.zones, z.id)); if(z.same != null) c.same = z.same; if(z.cross != null) c.cross = z.cross; return save("zones", z.id, c); }); });
+      jobs.reduce(function(pr, f){ return pr.then(f); }, Promise.resolve())
+        .then(function(){ bs[0].textContent = "اتنفّذ ✓"; TT.toast("التغيير اتحفظ ✓"); })
+        .catch(function(e){ bs[0].disabled = false; TT.toast(e.message || "حصلت مشكلة"); });
+    };
+  }
+  function aiAsk(q){
+    q = (q || "").trim(); if(!q) return;
+    aiBubble("user", TT.esc(q)); aiMsgs.push({ role:"user", content:q });
+    var wait = aiBubble("assistant", '<span class="hint">بيفكر…</span>');
+    $("aiSend").disabled = true; $("aiIn").value = "";
+    api("ai", { method:"POST", body:{ messages: aiMsgs }, retry:false })
+      .then(function(j){ wait.innerHTML = TT.esc(j.text || "—"); aiMsgs.push({ role:"assistant", content:j.text || "—" }); if(j.proposal) aiProposal(j.proposal); })
+      .catch(function(e){ wait.innerHTML = '<span style="color:var(--crit)">' + TT.esc(e.message || "حصلت مشكلة") + '</span>'; aiMsgs.pop(); })
+      .then(function(){ $("aiSend").disabled = false; });
+  }
+  $("aiSend").addEventListener("click", function(){ aiAsk($("aiIn").value); });
+  $("aiIn").addEventListener("keydown", function(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); aiAsk(this.value); } });
+  $("aiSug").addEventListener("click", function(e){ var b = e.target.closest("[data-aiq]"); if(b) aiAsk(b.getAttribute("data-aiq")); });
+
+  var tabs = ["dash","live","drivers","reports","price","ai","zones","places","admin"];
   tabs.forEach(function(t){
     $("tab-"+t).addEventListener("click", function(){
       tabs.forEach(function(o){ $("tab-"+o).setAttribute("aria-selected", String(o===t)); $("p-"+o).hidden = (o!==t); });
@@ -1089,19 +1150,23 @@
   });
   /* بيضيف الأماكن المشهورة الناقصة، وبعدين بيدوّر على مكان كل نقطة ناقصة على الخريطة لوحده (واحدة كل ثانية — شرط الخدمة المجانية) */
   $("seedPlaces").addEventListener("click", function(){
-    var b = this, have = {}; S.places.forEach(function(p){ have[p.name] = 1; });
-    var add = STARTER.filter(function(s){ return !have[s[0]]; });
+    addAndLocate(STARTER.map(function(s){ return { name:s[0], cat:s[1] }; }), this, "أضف وجهات كفر صقر (١٧٨) وحدد مكانها");
+  });
+  /* يضيف أماكن (اسم + تصنيف + إحداثيات لو موجودة) ويدوّر على مكان اللي مالوش إحداثيات */
+  function addAndLocate(items, b, label){
+    var have = {}; S.places.forEach(function(p){ have[p.name.trim()] = 1; });
+    var add = items.filter(function(s){ return s.name && !have[s.name.trim()] && (have[s.name.trim()] = 1); });
     var z = $("newPlaceZone").value || "";
     b.disabled = true; b.textContent = "بيضيف…";
-    var created = add.map(function(s, i){ var id = TT.uid() + i; return { id:id, name:s[0], cat:s[1], zoneId:z, lat:null, lng:null, order:S.places.length + i }; });
-    Promise.all(created.map(function(p){ return save("places", p.id, p); })).then(function(){
-      var todo = S.places.filter(function(p){ return p.lat == null; }).concat(created.filter(function(p){ return !TT.byId(S.places, p.id); }));
-      var seen = {}; todo = todo.filter(function(p){ if(seen[p.id]) return false; seen[p.id] = 1; return true; });
+    var created = add.map(function(s, i){ var id = TT.uid() + i; return { id:id, name:s.name.trim(), cat:s.cat || "other", zoneId:z, lat:s.lat != null ? s.lat : null, lng:s.lng != null ? s.lng : null, order:S.places.length + i }; });
+    var chain = created.reduce(function(pr, p){ return pr.then(function(){ return api("doc/places/" + p.id, { method:"PUT", body:p }); }); }, Promise.resolve());
+    chain.then(load).then(function(){
+      var todo = created.filter(function(p){ return p.lat == null; });
       var found = 0, i = 0;
       function next(){
         if(i >= todo.length){
-          b.disabled = false; b.textContent = "أضف وجهات كفر صقر (١٧٨) وحدد مكانها";
-          TT.toast("اتحدد مكان " + found + " من " + todo.length + (todo.length - found ? " — الباقي حدده بإيدك" : " ✓"));
+          b.disabled = false; b.textContent = label;
+          TT.toast("اتضاف " + created.length + " مكان — " + (created.length - todo.length + found) + " ليهم مكان على الخريطة" + (todo.length - found ? "، والباقي حدده بإيدك" : " ✓"));
           return;
         }
         var p = todo[i++]; b.textContent = "بيدوّر على «" + p.name + "» (" + i + "/" + todo.length + ")";
@@ -1110,7 +1175,76 @@
         }).catch(function(){}).then(function(){ setTimeout(next, 1100); });
       }
       next();
-    }).catch(function(e){ b.disabled = false; b.textContent = "أضف وجهات كفر صقر (١٧٨) وحدد مكانها"; TT.toast(e.message || "حصلت مشكلة"); });
+    }).catch(function(e){ b.disabled = false; b.textContent = label; TT.toast(e.message || "حصلت مشكلة"); });
+  }
+  /* رفع ملف أماكن: Excel (.xlsx) أو CSV أو نص (اسم في كل سطر) */
+  function unzipXlsx(buf){
+    var u = new Uint8Array(buf), dv = new DataView(buf), e = u.length - 22;
+    while(e > 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+    var n = dv.getUint16(e + 10, true), p = dv.getUint32(e + 16, true), jobs = {};
+    for(var k = 0; k < n; k++){
+      var m = dv.getUint16(p + 10, true), cs = dv.getUint32(p + 20, true), fl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true);
+      var name = new TextDecoder().decode(u.slice(p + 46, p + 46 + fl));
+      if(/sharedStrings\.xml$|worksheets\/sheet1\.xml$/.test(name)){
+        var s0 = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true), data = u.slice(s0, s0 + cs);
+        jobs[name.indexOf("shared") >= 0 ? "ss" : "sh"] = m === 0 ? Promise.resolve(new TextDecoder().decode(data)) : new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).text();
+      }
+      p += 46 + fl + xl + cl;
+    }
+    return Promise.all([jobs.ss || "", jobs.sh || ""]).then(function(r){
+      var dec = function(s){ return s.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&amp;/g,"&"); };
+      var ss = [], mm, reSi = /<(?:x:)?si>([\s\S]*?)<\/(?:x:)?si>/g;
+      while((mm = reSi.exec(r[0]))) ss.push(dec((mm[1].match(/<(?:x:)?t[^>]*>[\s\S]*?<\/(?:x:)?t>/g) || []).map(function(t){ return t.replace(/<[^>]+>/g, ""); }).join("")));
+      var rows = [], reR = /<(?:x:)?row[^>]*>([\s\S]*?)<\/(?:x:)?row>/g, rr;
+      while((rr = reR.exec(r[1]))){
+        var row = [], reC = /<(?:x:)?c r="([A-Z]+)\d+"([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:x:)?c>)/g, c;
+        while((c = reC.exec(rr[1]))){
+          var col = c[1].split("").reduce(function(a, ch){ return a * 26 + ch.charCodeAt(0) - 64; }, 0) - 1;
+          var body = c[3] || "", v = body.match(/<(?:x:)?v>([\s\S]*?)<\/(?:x:)?v>/), is = body.match(/<(?:x:)?t[^>]*>([\s\S]*?)<\/(?:x:)?t>/);
+          row[col] = v ? (/t="s"/.test(c[2]) ? ss[+v[1]] : dec(v[1])) : (is ? dec(is[1]) : "");
+        }
+        rows.push(row);
+      }
+      return rows;
+    });
+  }
+  function catOf(t){
+    t = String(t || "").split(/[–-]/)[0].trim();
+    if(/مواصلات|موقف|محطة/.test(t)) return "transport";
+    if(/مستشف|طبي|عياد|صيدل|معامل|صحة/.test(t)) return "health";
+    if(/حكوم|بنوك|بنك|اتصالات|مجلس|بريد/.test(t)) return "gov";
+    if(/مدارس|مدرسة|سناتر|مكتبات|حضان|تعليم/.test(t)) return "edu";
+    if(/أسواق|سوق|تسوق|مطاعم|مخابز|كافيه|محلات/.test(t)) return "market";
+    if(/قرية|قرى|عزبة/.test(t)) return "village";
+    return t ? "public" : "other";
+  }
+  function rowsToItems(rows){
+    if(!rows.length) return [];
+    var h = (rows[0] || []).map(function(x){ return String(x || "").trim(); });
+    var find = function(re){ for(var i = 0; i < h.length; i++) if(re.test(h[i])) return i; return -1; };
+    var iName = find(/اسم|الوجهة|المكان|name/i), iCat = find(/تصنيف|النوع|category|type/i), iLat = find(/^lat|خط العرض|latitude/i), iLng = find(/^(lng|lon)|خط الطول|longitude/i);
+    var body = rows;
+    if(iName >= 0) body = rows.slice(1); else iName = 0;
+    return body.map(function(r){
+      var nm = String(r[iName] || "").trim(), la = iLat >= 0 ? parseFloat(r[iLat]) : NaN, ln = iLng >= 0 ? parseFloat(r[iLng]) : NaN;
+      var ok = isFinite(la) && isFinite(ln) && TT.dist({ lat:la, lng:ln }, { lat:TT.CENTER[0], lng:TT.CENTER[1] }) < 15;
+      return { name: nm, cat: iCat >= 0 ? catOf(r[iCat]) : "other", lat: ok ? +la.toFixed(6) : null, lng: ok ? +ln.toFixed(6) : null };
+    }).filter(function(x){ return x.name && x.name.length < 80 && !/^\d+$/.test(x.name); });
+  }
+  $("placesFile").addEventListener("change", function(){
+    var f = this.files && this.files[0], inp = this; if(!f) return;
+    var btn = $("placesFileTxt"), label = "ارفع ملف أماكن (Excel أو CSV)";
+    var read = /\.xlsx$/i.test(f.name) ? f.arrayBuffer().then(unzipXlsx)
+      : f.text().then(function(t){ return t.replace(/^\uFEFF/, "").split(/\r?\n/).filter(function(l){ return l.trim(); }).map(function(l){ return l.split(/\t|,|،/); }); });
+    read.then(function(rows){
+      var items = rowsToItems(rows); inp.value = "";
+      if(!items.length){ TT.toast("مالقيتش أسامي أماكن في الملف"); return; }
+      var have = {}; S.places.forEach(function(p){ have[p.name.trim()] = 1; });
+      var fresh = items.filter(function(x){ return !have[x.name]; }), withLoc = fresh.filter(function(x){ return x.lat != null; }).length;
+      if(!fresh.length){ TT.toast("كل الأماكن اللي في الملف موجودة خلاص ✓"); return; }
+      if(!confirm("لقيت " + items.length + " مكان في الملف — " + fresh.length + " جداد" + (withLoc ? " (" + withLoc + " معاهم إحداثيات)" : "") + ".\nأضيفهم وأدوّر على مكان الباقي؟")) return;
+      addAndLocate(fresh, btn, label);
+    }).catch(function(){ inp.value = ""; TT.toast("الملف مش مفهوم — جرّب تحفظه Excel أو CSV"); });
   });
   var POI = [];
   var KIND = { hospital:"مستشفى", clinic:"عيادة", pharmacy:"صيدلية", school:"مدرسة", college:"كلية", university:"جامعة", place_of_worship:"جامع / كنيسة", bank:"بنك", post_office:"بريد", police:"شرطة", townhall:"مجلس المدينة", marketplace:"سوق", station:"محطة قطار", bus_station:"موقف", fuel:"بنزينة", cafe:"كافيه", restaurant:"مطعم", government:"جهة حكومية" };
