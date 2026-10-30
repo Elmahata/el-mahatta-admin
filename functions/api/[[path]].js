@@ -15,7 +15,8 @@
  *   GET    /api/track/:id?token=     عام — متابعة حالة الطلب (+ كود الركوب بعد القبول)
  *   GET    /api/share/:id?s=         عام — صفحة «شارك رحلتك» للأهل (بدون أرقام)
  *   POST   /api/report               عام — بلاغ من الراكب (مثلاً: طلب أكتر من السعر)
- *   POST   /api/driver/start         سائق — بدء الرحلة بكود الركوب
+ *   POST   /api/code-on              عام — الراكب يفعّل كود الركوب (اختياري)
+ *   POST   /api/driver/start         سائق — بدء الرحلة (بالكود لو الراكب فعّله)
  *   POST   /api/phone-request        إدارة — طلب بالتليفون تدخّله الإدارة
  *   POST   /api/driver/login         سائق — رقم الموبايل + الكود
  *   GET    /api/driver/feed          سائق — الطلبات المتاحة + مشواره الحالي
@@ -690,7 +691,7 @@ export async function onRequest({ request, env, params }) {
       const pt = (p) => (p && p.lat != null ? { lat: p.lat, lng: p.lng, label: p.label } : null);
       return json({
         id: r.id, status: r.status, fare: r.fare, outside: Boolean(r.outside), distKm: r.distKm ?? null, perKm: r.perKm || null, driver, driverLoc, from: pt(r.from), to: pt(r.to), createdAt: r.createdAt, assignedAt: r.assignedAt || null, scheduledAt: r.scheduledAt || null, discount: r.discount || 0,
-        code: r.status === "assigned" ? r.code : null, startedAt: r.startedAt || null,
+        code: r.status === "assigned" && r.codeOn ? r.code : null, codeOn: Boolean(r.codeOn), startedAt: r.startedAt || null,
         arrivedAt: r.arrivedAt || null, cancelReason: r.cancelReason || null,
         shareToken: r.shareToken || null, reported: Boolean(r.reported), impostorReported: Boolean(r.impostorReported),
         canRate: r.status === "done" && r.driverId && !r.rating && riderKey(r.riderPhone).length >= 9
@@ -978,6 +979,20 @@ export async function onRequest({ request, env, params }) {
       const earned = invited.filter((r) => r.status === "done").length;
       const used = requests.filter((r) => r.riderPhone === phone && r.refCredit && r.status !== "cancelled").length;
       return json({ code: refCode(phone), joined: invited.length, credit: Math.max(0, earned - used) * REF_OFF, off: REF_OFF });
+    }
+
+    /* كود الركوب اختياري: الراكب بيفعّله بنفسه لحد ما الرحلة تبدأ، وبعدها السائق لازم يكتبه */
+    if (route === "code-on" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.id, 40));
+      if (!r || !tokOk(b.token, r.token)) return json({ error: "غير مصرّح" }, 401);
+      if (r.status !== "assigned" || r.startedAt) return json({ error: "الرحلة بدأت خلاص — مينفعش تفعّل الكود دلوقتي" }, 409);
+      if (!r.codeOn) {
+        await putDoc(env, "requests", r.id, { ...r, codeOn: true, codeOnAt: Date.now() });
+        const d = r.driverId ? await getDoc(env, "drivers", r.driverId) : null;
+        if (d) { try { await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: "الراكب فعّل كود الركوب 🔒", body: "اسأله على الكود قبل ما تبدأ الرحلة", url: "/driver.html" }); } catch (e) {} }
+      }
+      return json({ ok: true, code: r.code });
     }
 
     /* بلاغ من الراكب — بيوصل للإدارة في تبويب «البلاغات» */
@@ -1330,7 +1345,7 @@ export async function onRequest({ request, env, params }) {
         const r = await getDoc(env, "requests", str(b.requestId, 40));
         if (!r) return json({ error: "الطلب غير موجود" }, 404);
         if (r.driverId !== me.id || r.status !== "assigned") return json({ error: "المشوار ده مش بتاعك" }, 403);
-        if (!safeEqual(digits(b.code), String(r.code || ""))) return json({ error: "الكود غلط — اسأل الراكب تاني" }, 400);
+        if (r.codeOn && !safeEqual(digits(b.code), String(r.code || ""))) return json({ error: "الكود غلط — اسأل الراكب تاني" }, 400);
         await putDoc(env, "requests", r.id, { ...r, startedAt: Date.now() });
         const dd = me;
         try { await pushFam(env, r.bookerPhone || r.riderPhone, { type: "start", requestId: r.id, share: r.shareToken || "", driver: dd.name + (dd.plate ? " · لوحة " + dd.plate : ""), to: r.to && r.to.label }, true); } catch (e) {}
@@ -1346,8 +1361,8 @@ export async function onRequest({ request, env, params }) {
         if (r.status !== "assigned") return json({ error: "المشوار اتقفل قبل كده" }, 409);
         /* بعد ما الراكب ركب مينفعش السائق يسيبه في نص الطريق — يكمّل أو يكلّم الإدارة */
         if (b.status === "released" && r.startedAt) return json({ error: "الراكب معاك خلاص — كمّل الرحلة أو كلّم الإدارة" }, 409);
-        if (b.status !== "released" && r.code && !r.startedAt)
-          return json({ error: "اكتب كود الركوب الأول علشان تبدأ الرحلة" }, 409);
+        if (b.status !== "released" && !r.startedAt)
+          return json({ error: r.codeOn ? "اكتب كود الركوب الأول علشان تبدأ الرحلة" : "دوس «ابدأ الرحلة» الأول" }, 409);
         /* الترك يرجّع الطلب للسباق بدل ما يضيع على الراكب */
         const next = b.status === "released"
           ? { ...r, status: "pending", driverId: "", assignedAt: null, startedAt: null, arrivedAt: null, offers: [], reopenedAt: Date.now(), skipDrivers: [...(r.skipDrivers || []), me.id].slice(-5) }
@@ -1414,6 +1429,83 @@ export async function onRequest({ request, env, params }) {
     }
 
     if (!isAdmin(request, env)) return json({ error: "غير مصرّح" }, 401);
+
+    /* مساعد الإدارة (AI): بيقرا إحصائيات من غير أسامي أو أرقام ركاب، وبيقترح تغييرات في إعدادات البورتال بس.
+       التنفيذ بيحصل من البورتال بعد ما الإدارة تدوس «موافق» — المساعد نفسه مابيغيّرش حاجة */
+    if (route === "ai" && method === "POST") {
+      if (!env.ANTHROPIC_API_KEY) return json({ error: "مفتاح الـ AI مش متضبط — ضيف ANTHROPIC_API_KEY في Cloudflare" }, 400);
+      const b = await parseBody(request);
+      const msgs = (Array.isArray(b.messages) ? b.messages : []).slice(-12)
+        .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: str(m.content, 2000) })).filter((m) => m.content);
+      if (!msgs.length || msgs[msgs.length - 1].role !== "user") return json({ error: "اكتب سؤالك" }, 400);
+      const { drivers, requests, reports, zones, places, config } = await readDocs(env, ["drivers", "requests", "reports", "zones", "places", "config"]);
+      const now = Date.now(), day = todayStr(), wk = now - 7 * 864e5;
+      const pricing = (config || []).find((c) => c.id === "pricing") || {};
+      const recent = requests.filter((r) => (r.createdAt || 0) > now - 30 * 864e5);
+      const cnt = (arr, f) => arr.reduce((a, x) => { const k = f(x); if (k) a[k] = (a[k] || 0) + 1; return a; }, {});
+      const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+      const stats = {
+        now: new Date(now).toISOString(), today: day,
+        pricing: { same: pricing.same, cross: pricing.cross, cutKm: pricing.cutKm, outPerKm: pricing.outPerKm, outKm: pricing.outKm },
+        zones: zones.map((z) => ({ id: z.id, name: z.name, same: z.same ?? null, cross: z.cross ?? null })),
+        places: { total: places.length, noLocation: places.filter((p) => p.lat == null).length },
+        rides: {
+          today: cnt(requests.filter((r) => r.day === day || new Date(r.createdAt || 0).toISOString().slice(0, 10) === day), (r) => r.status),
+          last7days: cnt(requests.filter((r) => (r.createdAt || 0) > wk), (r) => r.status),
+          last30days: cnt(recent, (r) => r.status),
+          cancelReasons30d: cnt(recent.filter((r) => r.status === "cancelled"), (r) => r.cancelReason || "other"),
+          outsideShare30d: recent.length ? +(recent.filter((r) => r.outside).length / recent.length).toFixed(2) : 0,
+          avgFare30d: recent.length ? Math.round(recent.reduce((a, r) => a + (+r.fare || 0), 0) / recent.length) : 0,
+          byHour30d: cnt(recent, (r) => String(new Date((r.createdAt || 0) + 2 * 36e5).getUTCHours())),
+          topDestinations30d: top(cnt(recent, (r) => r.to && r.to.label), 10),
+          topPickups30d: top(cnt(recent, (r) => r.from && r.from.label), 10),
+        },
+        drivers: drivers.map((d) => {
+          const mine = recent.filter((r) => r.driverId === d.id);
+          return { name: name2(d.name), plate: d.plate || "", active: d.active !== false, online: d.online !== false, hold: Boolean(d.hold),
+            done30d: mine.filter((r) => r.status === "done").length, released30d: d.released || 0,
+            rating: d.ratingAvg || d.rating || null, ...tierOf(d) };
+        }),
+        reports: reports.filter((r) => r.status === "open").map((r) => ({ kind: r.kind, asked: r.asked || 0, fare: r.fare, driver: name2((drivers.find((d) => d.id === r.driverId) || {}).name || ""), note: str(r.note, 200), at: new Date(r.createdAt || 0).toISOString().slice(0, 10) })),
+      };
+      const system = `إنت مساعد إدارة «المحطة» — تطبيق توكتوك في مدينة كفر صقر (الشرقية، مصر). بترد بالعامية المصرية، باختصار ووضوح، والأرقام بالأرقام العربية العادية.
+قواعد:
+- اعتمد على البيانات اللي تحت بس. لو المعلومة مش موجودة قول كده ومتألفش.
+- مفيش أي أسامي أو أرقام ركاب في البيانات، ومتطلبهاش.
+- لو الإدارة طلبت تغيير في التسعير أو سعر منطقة، استخدم أداة propose_change. ده اقتراح بس — الإدارة هي اللي بتوافق.
+- مش بتقدر تعدّل كود التطبيق ولا توقف سواقين ولا تمسح حاجة. لو اتطلب منك كده قول إن ده بيتعمل يدوي من البورتال أو مع المطوّر.
+- الأجرة برا المدينة = الكيلو × سعر الكيلو، وبتتقرّب لفوق لأقرب ٥ ج، ومتقلش عن سعر المشوار الطويل.
+البيانات (JSON):
+${JSON.stringify(stats)}`;
+      const tools = [{
+        name: "propose_change",
+        description: "اقتراح تغيير في إعدادات البورتال. مابيتنفذش غير بعد موافقة الإدارة.",
+        input_schema: { type: "object", properties: {
+          summary: { type: "string", description: "شرح التغيير بالعامية في سطر" },
+          pricing: { type: "object", properties: { same: { type: "number" }, cross: { type: "number" }, cutKm: { type: "number" }, outPerKm: { type: "number" }, outKm: { type: "number" } } },
+          zones: { type: "array", description: "سعر خاص لمنطقة: same = مشوار قصير، cross = مشوار طويل", items: { type: "object", properties: { id: { type: "string" }, same: { type: "number" }, cross: { type: "number" } }, required: ["id"] } },
+        }, required: ["summary"] },
+      }];
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: env.AI_MODEL || "claude-sonnet-4-5", max_tokens: 1200, system, tools, messages: msgs }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) return json({ error: "الـ AI مش راد: " + ((out.error && out.error.message) || res.status) }, 502);
+      const text = (out.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
+      const prop = (out.content || []).find((c) => c.type === "tool_use" && c.name === "propose_change");
+      let proposal = null;
+      if (prop && prop.input) {
+        const p = prop.input, okNum = (v, lo, hi) => typeof v === "number" && isFinite(v) && v >= lo && v <= hi;
+        const pr = {};
+        if (p.pricing) for (const [k, lo, hi] of [["same", 1, 500], ["cross", 1, 500], ["cutKm", 0.3, 20], ["outPerKm", 0.5, 100], ["outKm", 0.3, 20]]) if (okNum(p.pricing[k], lo, hi)) pr[k] = p.pricing[k];
+        const zs = (p.zones || []).filter((z) => zones.some((x) => x.id === z.id) && (okNum(z.same, 1, 500) || okNum(z.cross, 1, 500)))
+          .map((z) => ({ id: z.id, name: zones.find((x) => x.id === z.id).name, ...(okNum(z.same, 1, 500) ? { same: Math.round(z.same) } : {}), ...(okNum(z.cross, 1, 500) ? { cross: Math.round(z.cross) } : {}) }));
+        if (Object.keys(pr).length || zs.length) proposal = { summary: str(p.summary, 300), pricing: Object.keys(pr).length ? pr : null, zones: zs };
+      }
+      return json({ text: text || (proposal ? proposal.summary : "—"), proposal });
+    }
 
     if (route === "phone-request" && method === "POST") {
       const out = await createRequest(env, await parseBody(request), "phone");
