@@ -225,14 +225,6 @@
       <h2>تقرير المشاوير المتعددة · آخر ٣٠ يوم</h2>
       <div id="pMultiRep" class="hint">مفيش مشاوير متعددة لسه.</div>
     </div>
-    <details class="card">
-      <summary style="cursor:pointer;font-weight:700">أماكن من غير إحداثيات (السعر القديم بالمناطق)</summary>
-      <p class="hint">بيستخدم بس لو مكان الركوب أو الوجهة مالوش مكان على الخريطة. الأحسن تحدد مكان كل الأماكن.</p>
-      <div class="row" style="margin-top:12px">
-        <div class="field"><label for="pSame">نفس المنطقة (ج)</label><input id="pSame" type="number" min="0" step="1" inputmode="decimal"></div>
-        <div class="field"><label for="pCross">بين منطقتين (ج)</label><input id="pCross" type="number" min="0" step="1" inputmode="decimal"></div>
-      </div>
-    </details>
     <div class="banner b-warn"><span>⚠</span><span>السعر الجديد بيتطبّق على الطلبات الجديدة بس.</span></div>
     <button class="btn btn-primary btn-wide" id="pSave" type="button">حفظ التسعير</button>
   </section>
@@ -531,7 +523,7 @@
       }
       return '<div class="item '+(r.status==="pending"?"waiting":(r.status==="assigned"?"assigned":""))+'">'
         + '<div class="item-head"><strong>'+TT.esc(r.riderName||"راكب")+'</strong>'+chip
-        + '<span class="chip c-neutral">'+(r.sameZone?"مشوار قصير":"مشوار طويل")+'</span>'
+        + '<span class="chip c-neutral">'+(r.multi?"مشوار متعدد":(r.distKm!=null?r.distKm+" كم":"من غير مسافة"))+'</span>'
         + (r.source==="phone" ? '<span class="chip c-accent">بالتليفون</span>' : '')
         + (r.scheduledAt ? '<span class="chip c-warn">محجوز '+new Date(r.scheduledAt).toLocaleString("ar-EG",{ weekday:"short", hour:"numeric", minute:"2-digit" })+'</span>' : '')
         + (r.forOther ? '<span class="chip c-neutral">مطلوب لحد تاني</span>' : '')
@@ -632,8 +624,6 @@
         + '<span class="zdot" style="background:'+TT.zoneColor(S.zones,z.id)+'"></span><strong>'+TT.esc(z.name)+'</strong>'
         + (z.official ? '<span class="chip c-ok">حي مؤكد</span>' : '<span class="chip c-neutral">منطقة تشغيل</span>')
         + '<span class="meta num">'+n+' نقطة</span></div>'
-        + '<div class="leg" style="gap:8px;flex-wrap:wrap"><label style="margin:0;font-size:12px">سعر جوه المنطقة</label><input data-zsame="'+TT.esc(z.id)+'" type="number" min="0" step="1" value="'+(z.same||"")+'" placeholder="'+S.cfg.same+'" style="width:80px;font-size:13px;padding:5px 9px">'
-        + '<label style="margin:0;font-size:12px">لمنطقة تانية</label><input data-zcross="'+TT.esc(z.id)+'" type="number" min="0" step="1" value="'+(z.cross||"")+'" placeholder="'+S.cfg.cross+'" style="width:80px;font-size:13px;padding:5px 9px"><span class="hint">فاضي = السعر العام</span></div>'
         + '<div class="actions">'
         + '<button class="btn btn-ghost btn-sm" data-renz="'+TT.esc(z.id)+'">إعادة تسمية</button>'
         + '<button class="btn btn-ghost btn-sm" data-delz="'+TT.esc(z.id)+'">حذف</button></div></div>';
@@ -758,7 +748,7 @@
     var inZ = done.filter(function(r){ return r.sameZone; }), cr = done.filter(function(r){ return !r.sameZone; });
     $("mix").innerHTML = done.length
       ? '<div class="tscroll"><table><thead><tr><th>النوع</th><th class="num">العدد</th><th class="num">النسبة</th><th class="num">الإجمالي</th></tr></thead><tbody>'
-        + [["مشوار قصير",inZ],["مشوار طويل",cr]].map(function(g){
+        + [["لحد ٢ كم",inZ],["أكتر من ٢ كم",cr]].map(function(g){
             var pct = Math.round(g[1].length/done.length*100);
             var sum = g[1].reduce(function(s,r){ return s+(r.fare||0); },0);
             return '<tr><td>'+g[0]+'</td><td class="num">'+g[1].length+'</td><td class="num">'+pct+'%</td><td class="num">'+sum+' ج</td></tr>';
@@ -882,7 +872,7 @@
   }
 
   function renderAll(){
-    $("farePill").textContent = S.cfg.same + "–" + S.cfg.cross + " ج";
+    $("farePill").textContent = prCfg().perKm + " ج/كم";
     renderPrice();
     if(document.activeElement !== $("cPaidFrom")) $("cPaidFrom").value = S.cfg.paidFrom || "";
     if(document.activeElement !== $("cWeek")) $("cWeek").value = S.cfg.week;
@@ -1308,12 +1298,12 @@
 
   /* ---------- التسعير ---------- */
   function prCfg(){ var c = S.cfgRaw || {}, n = function(v, d){ return (v === undefined || v === null || v === "" || !isFinite(+v) || +v < 0) ? d : +v; };
-    return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15, same: n(c.same, S.cfg.same), cross: n(c.cross, S.cfg.cross) }; }
-  var P_IDS = [["pKm","perKm"],["pMin","minFare"],["pFree","freeMin"],["pWaitMin","waitPerMin"],["pMaxWait","maxWaitMin"],["pSame","same"],["pCross","cross"]];
+    return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15 }; }
+  var P_IDS = [["pKm","perKm"],["pMin","minFare"],["pFree","freeMin"],["pWaitMin","waitPerMin"],["pMaxWait","maxWaitMin"]];
   function pVals(){
     var d = prCfg(), o = {};
     P_IDS.forEach(function(x){ var v = parseFloat($(x[0]).value); o[x[1]] = isNaN(v) ? d[x[1]] : v; });
-    o.same = Math.round(o.same); o.cross = Math.round(o.cross); return o;
+    return o;
   }
   var up5 = function(x){ return Math.ceil((x - 1e-9) / 5) * 5; };
   function pFare(v, km, waitMin){
