@@ -137,6 +137,12 @@
           cutKm: cfgDoc && +cfgDoc.cutKm > 0 ? +cfgDoc.cutKm : 2,
           outKm: cfgDoc && +cfgDoc.outKm > 0 ? +cfgDoc.outKm : 1.5,
           outPerKm: cfgDoc && +cfgDoc.outPerKm > 0 ? +cfgDoc.outPerKm : 7.5,
+          /* التسعير الموحّد + انتظار المشوار المتعدد */
+          perKm: cfgDoc && cfgDoc.perKm != null && cfgDoc.perKm !== "" ? +cfgDoc.perKm : 8,
+          minFare: cfgDoc && cfgDoc.minFare != null && cfgDoc.minFare !== "" ? +cfgDoc.minFare : 10,
+          freeMin: cfgDoc && cfgDoc.freeMin != null && cfgDoc.freeMin !== "" ? +cfgDoc.freeMin : 3,
+          waitPerMin: cfgDoc && cfgDoc.waitPerMin != null && cfgDoc.waitPerMin !== "" ? +cfgDoc.waitPerMin : 1,
+          maxWaitMin: cfgDoc && cfgDoc.maxWaitMin != null && cfgDoc.maxWaitMin !== "" ? +cfgDoc.maxWaitMin : 15,
           sub: cfgDoc && cfgDoc.sub != null ? cfgDoc.sub : 200,
           freeUntil: (cfgDoc && cfgDoc.freeUntil) || "",
           paidFrom: (cfgDoc && cfgDoc.paidFrom) || "",
