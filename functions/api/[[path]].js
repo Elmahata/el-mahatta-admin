@@ -233,7 +233,7 @@ function resolveLeg(places, o) {
 
 /** ما يراه السائق قبل القبول: بلا اسم الراكب ولا رقمه */
 const teaser = (r) => ({
-  id: r.id, from: r.from, to: r.to, fare: r.fare, sameZone: r.sameZone, outside: Boolean(r.outside), distKm: r.distKm ?? null, perKm: r.perKm || null, createdAt: r.createdAt, source: r.source || "app",
+  id: r.id, from: r.from, to: r.to, fare: r.fare, sameZone: r.sameZone, outside: Boolean(r.outside), distKm: r.distKm ?? null, perKm: r.perKm || null, multi: Boolean(r.multi), createdAt: r.createdAt, source: r.source || "app",
   scheduledAt: r.scheduledAt || null, forOther: Boolean(r.forOther),
 });
 
@@ -259,6 +259,62 @@ const tokOk = (given, real) => Boolean(real) && safeEqual(given, real);
 const OTP_TTL = 10 * 60 * 1000, OTP_WAIT = 60 * 1000, OTP_DAY_MAX = 5, OTP_TRIES = 5;
 const SESSION_TTL = 180 * 864e5;
 const otpOn = (env) => Boolean(env.WA_TOKEN && env.WA_PHONE_ID);
+
+/* ===== تأكيد عكسي على واتساب (Reverse OTP) — مش محتاج قالب ولا توثيق بيزنس =====
+   الراكب بيبعت رسالة فيها كود من ٦ أرقام لرقم المحطة على واتساب، والـ Webhook بيتأكد إن الرقم اللي بعت هو نفس الرقم اللي اتكتب.
+   المتغيرات: WA_VERIFY (كلمة سر تأكيد الـ Webhook، إنت بتختارها) + WA_APP_SECRET (App secret من Meta).
+   اختياري: WA_NUMBER (افتراضي 201131207998)، و WA_TOKEN + WA_PHONE_ID علشان يرد على الراكب «تم التأكيد».
+   لو الاتنين الأولانيين موجودين، ده بيشتغل بدل كود القالب. */
+const ROTP_TTL = 15 * 60 * 1000;
+const rotpOn = (env) => Boolean(env.WA_VERIFY && env.WA_APP_SECRET);
+const verifyOn = (env) => rotpOn(env) || otpOn(env);
+const waNumber = (env) => digits(env.WA_NUMBER || "201131207998");
+const latinDigits = (t) => String(t || "").replace(/[\u0660-\u0669]/g, (d) => d.charCodeAt(0) - 0x660).replace(/[\u06F0-\u06F9]/g, (d) => d.charCodeAt(0) - 0x6F0);
+async function hmacHex(secret, raw) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw));
+  return Array.from(new Uint8Array(sig), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+/** رد نصي جوه نافذة الـ ٢٤ ساعة (العميل هو اللي بدأ، فمش محتاج قالب). بيشتغل بس لو WA_TOKEN و WA_PHONE_ID موجودين */
+async function waReply(env, to, text) {
+  if (!(env.WA_TOKEN && env.WA_PHONE_ID)) return;
+  try {
+    await fetch("https://graph.facebook.com/v21.0/" + env.WA_PHONE_ID + "/messages", {
+      method: "POST",
+      headers: { authorization: "Bearer " + env.WA_TOKEN, "content-type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", to: digits(to), type: "text", text: { body: text } }),
+    });
+  } catch (e) {}
+}
+async function waWebhook(request, env) {
+  const raw = await request.text();
+  if (raw.length > 200000) return new Response("too large", { status: 413 });
+  const sig = str(request.headers.get("x-hub-signature-256"), 100);
+  if (!env.WA_APP_SECRET || !safeEqual(sig, "sha256=" + (await hmacHex(env.WA_APP_SECRET, raw)))) return new Response("bad signature", { status: 401 });
+  let body = {};
+  try { body = JSON.parse(raw); } catch (e) { return json({ ok: true }); }
+  const now = Date.now();
+  for (const en of body.entry || []) for (const ch of en.changes || []) {
+    for (const m of (ch.value && ch.value.messages) || []) {
+      const from = digits(m.from);
+      const txt = latinDigits(m.type === "text" ? m.text && m.text.body : m.button ? m.button.text : "");
+      const hit = txt.replace(/[\s-]/g, "").match(/\d{6}/);
+      if (!hit) continue;
+      const o = await getDoc(env, "rotp", hit[0]);
+      if (!o || o.done || now - o.at > ROTP_TTL) { await waReply(env, from, "الكود ده خلص أو مش صحيح. ارجع للتطبيق ودوس «كود جديد»."); continue; }
+      if (l10(from) === o.phone) {
+        o.done = true; o.doneAt = now; o.wrong = false;
+        await putDoc(env, "rotp", hit[0], o);
+        await waReply(env, from, "✓ تم تأكيد رقمك في المحطة. ارجع للتطبيق وكمّل 🛺");
+      } else {
+        o.wrong = true;
+        await putDoc(env, "rotp", hit[0], o);
+        await waReply(env, from, "الرسالة دي اتبعتت من رقم غير الرقم اللي اتكتب في التطبيق. ابعتها من نفس الرقم.");
+      }
+    }
+  }
+  return json({ ok: true });
+}
 const l10 = (p) => digits(p).slice(-10);
 const intl = (p) => { const d = digits(p); return d.startsWith("20") ? d : d.startsWith("0") ? "20" + d.slice(1) : "20" + d; };
 const rnd = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => (b % 10)).join("");
@@ -414,7 +470,7 @@ async function newSession(env, phone, role) {
 }
 /** لو التأكيد شغال: لازم جلسة صحيحة لنفس الرقم. بيرجّع null لو تمام، أو رد خطأ */
 async function needSession(request, env, phone, role) {
-  if (!otpOn(env)) return null;
+  if (!verifyOn(env)) return null;
   const t = str(request.headers.get("x-session"), 80);
   const s = t ? await getDoc(env, "sessions", t) : null;
   if (!s || s.role !== role || s.phone !== l10(phone) || Date.now() - s.at > SESSION_TTL)
@@ -439,6 +495,31 @@ async function sendOtp(env, phone, code) {
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error((j.error && j.error.message) || "wa " + r.status); }
 }
 
+/* التسعير الموحّد: الكيلو بـ perKm (٨ ج) جوه وبرّه كفر صقر · أقل مشوار minFare (١٠ ج) · الإجمالي بيتقرّب لأعلى ٥ ج.
+   المشوار المتعدد بالعدّاد: المسافة اللي اتمشت فعلاً + انتظار: freeMin دقايق ببلاش في كل وقفة، وبعدها waitPerMin لكل دقيقة كاملة، وأقصى وقفة maxWaitMin */
+const PR = (c) => { c = c || {}; const n = (v, d) => (v === undefined || v === null || v === "" || !isFinite(+v) || +v < 0) ? d : +v;
+  return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15 }; };
+const up5 = (x) => Math.ceil((x - 1e-9) / 5) * 5;
+async function pricingCfg(env) { const { config } = await readDocs(env, ["config"]); return (config || []).find((c) => c.id === "pricing") || {}; }
+/* أقرب طريق على الخريطة بين نقطتين (بالكيلو) — لو الخدمة مارديتش: null والحساب يرجع لخط مستقيم × ١٫٣ */
+async function roadKm(a, b) {
+  try {
+    const u = "https://router.project-osrm.org/route/v1/driving/" + (+a.lng) + "," + (+a.lat) + ";" + (+b.lng) + "," + (+b.lat) + "?overview=false";
+    const res = await fetch(u, { signal: AbortSignal.timeout(2500), cf: { cacheTtl: 86400 } });
+    const j = await res.json(); const m = j && j.routes && j.routes[0] && j.routes[0].distance;
+    return m > 0 ? m / 1000 : null;
+  } catch (e) { return null; }
+}
+function meterView(r, pr, now) {
+  const free = pr.freeMin * 60e3, max = pr.maxWaitMin * 60e3;
+  const ws = (r.waits || []).concat(r.waitOn ? [{ s: r.waitOn.s, e: now }] : []);
+  let paidMin = 0, freeMs = 0, totalMs = 0;
+  ws.forEach((w) => { const d = Math.max(0, Math.min(w.e - w.s, max)); totalMs += d; freeMs += Math.min(d, free); paidMin += Math.floor(Math.max(0, d - free) / 60e3); });
+  const km = +(((r.meter && r.meter.km) || 0)).toFixed(2), distCost = +(km * pr.perKm).toFixed(1), waitCost = paidMin * pr.waitPerMin, sum = +(distCost + waitCost).toFixed(1);
+  return { km, distCost, paidMin, waitCost, freeSec: Math.round(freeMs / 1000), waitSec: Math.round(totalMs / 1000), stops: ws.length, sum, final: Math.max(pr.minFare, up5(sum)),
+    waitOn: r.waitOn ? { s: r.waitOn.s } : null, weak: Boolean(r.meter && r.meter.weakAt && now - r.meter.weakAt < 20000), now, ...pr };
+}
+
 async function createRequest(env, b, source) {
   const name = str(b.riderName, 60);
   const phone = digits(b.riderPhone).slice(0, 15);
@@ -457,29 +538,31 @@ async function createRequest(env, b, source) {
   };
   const from = pick("fromId", "from");
   const to = pick("toId", "to");
-  if (!from || !to) return { error: "حدّد مكان الركوب والوجهة", status: 400 };
+  const multi = Boolean(b.multi);
+  const to2 = to || (multi ? { label: "مشوار متعدد — هيقول للسواق", lat: null, lng: null, zoneId: "" } : null);
+  if (!from || !to2) return { error: "حدّد مكان الركوب والوجهة", status: 400 };
+  const pr = PR(cfg);
 
   /* السعر يُحسب هنا فقط — لا يُقرأ من العميل */
   /* بالمسافة: خط مستقيم × ١٫٣ ≈ مسافة الشوارع. لحد cutKm (٢ كم) = سعر المشوار القصير، أكتر = الطويل.
      لو مكان مالوش إحداثيات: نرجع للمناطق (نفس المنطقة = قصير، بين منطقتين = طويل) */
   const hasXY = (p) => p && p.lat != null && p.lng != null && isFinite(+p.lat) && isFinite(+p.lng);
-  const cutKm = Number(cfg.cutKm) > 0 ? Number(cfg.cutKm) : 2;
-  let same, fare, distKm = null;
-  if (hasXY(from) && hasXY(to)) {
-    distKm = Math.round(meters({ lat: +from.lat, lng: +from.lng }, { lat: +to.lat, lng: +to.lng }) * 1.3 / 100) / 10;
-    same = distKm <= cutKm;
-    fare = same ? cfg.same : cfg.cross;
+  let same, fare, distKm = null, roadKmV = null;
+  const outside = false, perKm = pr.perKm;
+  if (multi) { same = false; fare = pr.minFare; }
+  else if (hasXY(from) && hasXY(to2)) {
+    roadKmV = await roadKm(from, to2);
+    distKm = roadKmV != null ? Math.round(roadKmV * 10) / 10 : Math.round(meters({ lat: +from.lat, lng: +from.lng }, { lat: +to2.lat, lng: +to2.lng }) * 1.3 / 100) / 10;
+    fare = Math.max(pr.minFare, up5(distKm * pr.perKm)); same = distKm <= 2;
   } else {
-    same = Boolean(from.zoneId && to.zoneId && from.zoneId === to.zoneId);
+    /* مكان من غير إحداثيات: نرجع لأسعار المناطق القديمة */
+    same = Boolean(from.zoneId && to2.zoneId && from.zoneId === to2.zoneId);
     fare = same ? cfg.same : cfg.cross;
-    const zf = zones.find((z) => z.id === from.zoneId), zt = zones.find((z) => z.id === to.zoneId);
+    const zf = zones.find((z) => z.id === from.zoneId), zt = zones.find((z) => z.id === to2.zoneId);
     if (same && zf && Number(zf.same) > 0) fare = Number(zf.same);
     if (!same) { const zc = Math.max(Number(zf && zf.cross) || 0, Number(zt && zt.cross) || 0); if (zc > 0) fare = zc; }
+    fare = Math.max(pr.minFare, Number(fare) || pr.minFare);
   }
-  /* مشوار خارج كفر صقر: لو مكان الركوب أو الوجهة أبعد من ١٫٥ كم عن أقرب مكان معروف ← الكيلو بـ ٧٫٥ ج والمجموع بيتقرّب لفوق لأقرب ٥ ج (ومش أقل من سعر المشوار الطويل) */
-  const outM = (Number(cfg.outKm) > 0 ? Number(cfg.outKm) : 1.5) * 1000, perKm = Number(cfg.outPerKm) > 0 ? Number(cfg.outPerKm) : 7.5;
-  const outside = distKm != null && places.some((p) => p.lat != null) && [from, to].some((p) => p.nearMetres != null && p.nearMetres > outM);
-  if (outside) { fare = Math.max(Number(cfg.cross) || 0, Math.ceil((distKm * perKm - 1e-9) / 5) * 5); same = false; }
   const now = Date.now();
 
   /* احجز لبعدين: من ٢٠ دقيقة لحد ٧ أيام */
@@ -519,15 +602,15 @@ async function createRequest(env, b, source) {
   const id = uid(), tok = newToken(), share = newToken().slice(0, 12);
   await putDoc(env, "requests", id, {
     id, token: tok, shareToken: share, code: rideCode(), source,
-    riderName: name, riderPhone: phone, note: str(b.note, 140), from, to, ip: str(b.__ip, 64),
-    fare, sameZone: same, distKm, outside, perKm: outside ? perKm : null, status: "pending", driverId: "",
+    riderName: name, riderPhone: phone, note: str(b.note, 140), from, to: to2, multi, ip: str(b.__ip, 64),
+    fare, sameZone: same, distKm, roadKm: roadKmV != null, outside, perKm, status: "pending", driverId: "",
     createdAt: now, day: todayStr(), scheduledAt,
     forOther: Boolean(b.forOther), bookerPhone: b.forOther ? digits(b.bookerPhone).slice(0, 15) : "",
     discount, refBy: discount && refBy ? refBy : "", refCredit: Boolean(discount && !refBy),
     repeatId: source === "repeat" ? str(b.repeatId, 40) : "", prefDriver: source === "repeat" ? str(b.prefDriverId, 40) : "",
   });
-  if (!scheduledAt || scheduledAt - now < 15 * 60e3) await pushDrivers(env, { from, to, fare });
-  return { ok: true, id, token: tok, shareToken: share, fare, sameZone: same, distKm, outside, perKm: outside ? perKm : null, discount, scheduledAt, refCode: refCode(phone) };
+  if (!scheduledAt || scheduledAt - now < 15 * 60e3) await pushDrivers(env, { from, to: to2, fare: multi ? "بالعدّاد" : fare });
+  return { ok: true, id, token: tok, shareToken: share, fare, multi, sameZone: same, distKm, outside, perKm, discount, scheduledAt, refCode: refCode(phone) };
 }
 
 export async function onRequest({ request, env, params }) {
@@ -588,13 +671,27 @@ export async function onRequest({ request, env, params }) {
       const b = await parseBody(request);
       const phone = digits(b.phone), role = "rider";
       if (phone.length < 10) return json({ error: "رقم الموبايل مش صحيح" }, 400);
-      if (!otpOn(env)) return json({ skip: true, token: await newSession(env, phone, role) });
+      if (!verifyOn(env)) return json({ skip: true, token: await newSession(env, phone, role) });
       const now = Date.now(), key = l10(phone);
       const log = (await getDoc(env, "otplog", key)) || { sends: [] };
       log.sends = log.sends.filter((t) => now - t < 864e5);
       const lastAt = log.sends[log.sends.length - 1] || 0;
       if (now - lastAt < OTP_WAIT) return json({ error: "استنى دقيقة وجرّب تاني" }, 429);
       if (log.sends.length >= OTP_DAY_MAX) return json({ error: "وصلت لآخر عدد أكواد النهارده — جرّب بكرة أو كلّم الإدارة" }, 429);
+      if (rotpOn(env)) {
+        let code = "";
+        for (let i = 0; i < 6 && !code; i++) {
+          const c = rnd(6), old = await getDoc(env, "rotp", c);
+          if (!old || old.done || now - old.at > ROTP_TTL) code = c;
+        }
+        if (!code) return json({ error: "حصلت مشكلة — جرّب تاني" }, 503);
+        const id = tok().slice(0, 20);
+        await putDoc(env, "rotp", code, { code, id, phone: key, role, at: now, done: false });
+        log.sends.push(now);
+        await putDoc(env, "otplog", key, log);
+        const text = "كود تأكيد المحطة: " + code;
+        return json({ mode: "wa", id, code, to: waNumber(env), wa: "https://wa.me/" + waNumber(env) + "?text=" + encodeURIComponent(text), ttl: ROTP_TTL / 1000, wait: OTP_WAIT / 1000 });
+      }
       const code = rnd(6), id = tok().slice(0, 20);
       try { await sendOtp(env, phone, code); }
       catch (e) { return json({ error: "ماقدرناش نبعت الكود — اتأكد إن الرقم عليه واتساب", detail: String(e.message).slice(0, 200) }, 502); }
@@ -602,6 +699,27 @@ export async function onRequest({ request, env, params }) {
       await putDoc(env, "otplog", key, log);
       await putDoc(env, "otp", id, { phone: key, role, code, at: now, tries: 0 });
       return json({ id, wait: OTP_WAIT / 1000 });
+    }
+
+    if (route === "otp" && sub === "check" && method === "POST") {
+      const b = await parseBody(request);
+      const code = digits(b.code).slice(0, 6), o = code.length === 6 ? await getDoc(env, "rotp", code) : null;
+      if (!o || !safeEqual(str(b.id, 40), o.id)) return json({ error: "الكود ده مش موجود — دوس «كود جديد»" }, 400);
+      if (!o.done) {
+        if (Date.now() - o.at > ROTP_TTL) return json({ error: "الكود خلص — دوس «كود جديد»" }, 400);
+        return json({ pending: true, wrong: Boolean(o.wrong) });
+      }
+      if (!o.token) { o.token = await newSession(env, o.phone, o.role); await putDoc(env, "rotp", code, o); }
+      return json({ token: o.token });
+    }
+
+    /* Webhook واتساب (Meta): GET للتأكيد وقت الإعداد، و POST للرسايل الجاية */
+    if (route === "wa" && sub === "webhook") {
+      if (method === "GET") {
+        const ok = url.searchParams.get("hub.mode") === "subscribe" && env.WA_VERIFY && safeEqual(url.searchParams.get("hub.verify_token"), env.WA_VERIFY);
+        return ok ? new Response(url.searchParams.get("hub.challenge") || "", { status: 200, headers: { "content-type": "text/plain" } }) : new Response("forbidden", { status: 403 });
+      }
+      if (method === "POST") return await waWebhook(request, env);
     }
 
     if (route === "otp" && sub === "verify" && method === "POST") {
@@ -692,6 +810,7 @@ export async function onRequest({ request, env, params }) {
       return json({
         id: r.id, status: r.status, fare: r.fare, outside: Boolean(r.outside), distKm: r.distKm ?? null, perKm: r.perKm || null, driver, driverLoc, from: pt(r.from), to: pt(r.to), createdAt: r.createdAt, assignedAt: r.assignedAt || null, scheduledAt: r.scheduledAt || null, discount: r.discount || 0,
         code: r.status === "assigned" && r.codeOn ? r.code : null, codeOn: Boolean(r.codeOn), startedAt: r.startedAt || null,
+        multi: Boolean(r.multi), meter: r.multi && r.startedAt && r.status === "assigned" ? meterView(r, PR(await pricingCfg(env)), Date.now()) : null, bill: r.bill || null,
         arrivedAt: r.arrivedAt || null, cancelReason: r.cancelReason || null,
         shareToken: r.shareToken || null, reported: Boolean(r.reported), impostorReported: Boolean(r.impostorReported),
         canRate: r.status === "done" && r.driverId && !r.rating && riderKey(r.riderPhone).length >= 9
@@ -1126,8 +1245,46 @@ export async function onRequest({ request, env, params }) {
         /* وهو في مشوار: كل ثانيتين (التوكتوك لايف عند الراكب والأهل) · وهو فاضي: كل ٤ ثواني بالكتير */
         if (me.loc && Date.now() - me.loc.at < (b.idle ? 4000 : 1500) && !(me.loc.h == null && b.h != null && isFinite(+b.h))) return json({ ok: true });
         me.loc = { lat: +lat.toFixed(6), lng: +lng.toFixed(6), h: b.h != null && isFinite(+b.h) ? Math.round(+b.h) : (me.loc && me.loc.h != null ? me.loc.h : null), at: Date.now(), idle: Boolean(b.idle) };
+        /* عدّاد المشوار المتعدد: بنجمع المسافة اللي اتمشت فعلاً. لو الإشارة قطعت (فجوة > ١٥ ث) بنحسب أقرب طريق على الخريطة بين النقطتين */
+        if (me.meterId) {
+          try {
+            const r = await getDoc(env, "requests", me.meterId);
+            if (!r || r.status !== "assigned" || !r.multi) me.meterId = null;
+            else if (r.startedAt) {
+              const m = r.meter || { km: 0 }, p = { lat: me.loc.lat, lng: me.loc.lng, at: me.loc.at };
+              if (!m.last) m.last = p;
+              else {
+                const d = meters(m.last, p), gap = p.at - m.last.at;
+                if (d >= 15) {
+                  let km = d / 1000;
+                  if (gap > 15000 && d > 150) { const rk = await roadKm(m.last, p); km = rk != null ? rk : km * 1.3; m.weakAt = p.at; }
+                  m.km = +((+m.km || 0) + km).toFixed(3); m.last = p; m.moveAt = p.at;
+                  /* التوكتوك اتحرك أكتر من ٥٠ م من مكان الوقفة ← الانتظار بيقف لوحده */
+                  if (r.waitOn && r.waitOn.lat != null && meters(r.waitOn, p) > 50) { r.waits = [...(r.waits || []), { s: r.waitOn.s, e: p.at, auto: true }]; r.waitOn = null; }
+                } else m.last = { ...m.last, at: p.at };
+              }
+              r.meter = m; await putDoc(env, "requests", r.id, r);
+            }
+          } catch (e) {}
+        }
         await putDoc(env, "drivers", me.id, me);
         return json({ ok: true });
+      }
+
+      /* المشوار المتعدد: «انتظار» / «كمّل المشوار» */
+      if (sub === "wait" && method === "POST") {
+        const b = await parseBody(request);
+        const r = await getDoc(env, "requests", str(b.requestId, 40));
+        if (!r || r.driverId !== me.id || r.status !== "assigned" || !r.startedAt || !r.multi) return json({ error: "مفيش مشوار متعدد شغال" }, 409);
+        const now = Date.now();
+        if (b.on) {
+          if (!r.waitOn) {
+            if (r.meter && r.meter.moveAt && now - r.meter.moveAt < 6000) return json({ error: "اقف الأول وبعدين دوس «انتظار»" }, 409);
+            r.waitOn = { s: now, lat: me.loc ? me.loc.lat : null, lng: me.loc ? me.loc.lng : null };
+          }
+        } else if (r.waitOn) { r.waits = [...(r.waits || []), { s: r.waitOn.s, e: now }]; r.waitOn = null; }
+        await putDoc(env, "requests", r.id, r);
+        return json({ ok: true, meter: meterView(r, PR(await pricingCfg(env)), now) });
       }
 
       if (sub === "online" && method === "POST") {
@@ -1171,6 +1328,7 @@ export async function onRequest({ request, env, params }) {
           .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0] || null;
         /* الكود والتوكنات متبعتش للسائق — لازم يسأل الراكب */
         const mine = mineFull ? (({ code, token, shareToken, riderPhone, bookerPhone, refBy, ...rest }) => rest)(mineFull) : null;
+        if (mine && mine.multi && mine.startedAt) mine.meterV = meterView(mineFull, PR(await pricingCfg(env)), Date.now());
 
         const blocked = ss.state === "stopped";
         const zones = Array.isArray(me.zones) ? me.zones : [];
@@ -1346,7 +1504,9 @@ export async function onRequest({ request, env, params }) {
         if (!r) return json({ error: "الطلب غير موجود" }, 404);
         if (r.driverId !== me.id || r.status !== "assigned") return json({ error: "المشوار ده مش بتاعك" }, 403);
         if (r.codeOn && !safeEqual(digits(b.code), String(r.code || ""))) return json({ error: "الكود غلط — اسأل الراكب تاني" }, 400);
-        await putDoc(env, "requests", r.id, { ...r, startedAt: Date.now() });
+        const st = Date.now();
+        await putDoc(env, "requests", r.id, { ...r, startedAt: st, ...(r.multi ? { meter: { km: 0, last: me.loc ? { lat: me.loc.lat, lng: me.loc.lng, at: st } : null }, waits: [], waitOn: null } : {}) });
+        if (r.multi) { me.meterId = r.id; await putDoc(env, "drivers", me.id, me); }
         const dd = me;
         try { await pushFam(env, r.bookerPhone || r.riderPhone, { type: "start", requestId: r.id, share: r.shareToken || "", driver: dd.name + (dd.plate ? " · لوحة " + dd.plate : ""), to: r.to && r.to.label }, true); } catch (e) {}
         return json({ ok: true });
@@ -1367,6 +1527,14 @@ export async function onRequest({ request, env, params }) {
         const next = b.status === "released"
           ? { ...r, status: "pending", driverId: "", assignedAt: null, startedAt: null, arrivedAt: null, offers: [], reopenedAt: Date.now(), skipDrivers: [...(r.skipDrivers || []), me.id].slice(-5) }
           : { ...r, status: "done", finishedAt: Date.now(), day: todayStr() };
+        /* المشوار المتعدد: الأجرة النهائية من العدّاد */
+        if (next.status === "done" && r.multi) {
+          const nw = Date.now();
+          if (next.waitOn) { next.waits = [...(next.waits || []), { s: next.waitOn.s, e: nw }]; next.waitOn = null; }
+          const mv = meterView(next, PR(await pricingCfg(env)), nw); delete mv.waitOn; delete mv.weak;
+          next.bill = mv; next.fare = mv.final;
+        }
+        if (next.status === "done" || b.status === "released") me.meterId = null;
         /* عدّادات المستوى: كام مشوار خلص وكام مرة ساب المشوار */
         try {
           if (next.status === "done" && r.status !== "done") me.rideCount = (me.rideCount || 0) + 1;
@@ -1404,7 +1572,19 @@ export async function onRequest({ request, env, params }) {
         }
         await putDoc(env, "requests", rid, next);
         if (next.status === "done") { try { await pushFam(env, r.bookerPhone || r.riderPhone, { type: "done", requestId: r.id, to: r.to && r.to.label }, true); } catch (e) {} }
-        return json({ ok: true, status: next.status });
+        /* كسب السائق النهارده (بيظهر له في آخر الرحلة) */
+        let today = null;
+        if (next.status === "done") {
+          try {
+            const { requests } = await readDocs(env, ["requests"]), dy = todayStr();
+            const mine = requests.filter((x) => x.driverId === me.id && x.status === "done" && x.day === dy);
+            if (!mine.some((x) => x.id === next.id)) mine.push(next);
+            today = { rides: mine.length, km: +mine.reduce((t, x) => t + (+(x.bill ? x.bill.km : x.distKm) || 0), 0).toFixed(1),
+              fare: mine.reduce((t, x) => t + (+x.fare || 0), 0), paidMin: mine.reduce((t, x) => t + ((x.bill && x.bill.paidMin) || 0), 0),
+              waitCost: mine.reduce((t, x) => t + ((x.bill && x.bill.waitCost) || 0), 0) };
+          } catch (e) {}
+        }
+        return json({ ok: true, status: next.status, fare: next.fare, bill: next.bill || null, today });
       }
 
       return json({ error: "غير موجود" }, 404);
