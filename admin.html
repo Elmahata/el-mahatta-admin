@@ -196,32 +196,44 @@
   <!-- التسعير -->
   <section id="p-price" class="stack" hidden>
     <div class="card">
-      <h2>جوه كفر صقر — سعر ثابت</h2>
-      <p class="hint">المسافة بتتحسب بالشوارع تقريباً (الخط المستقيم × ١٫٣).</p>
+      <h2>سعر المشوار — موحّد جوه وبرّه كفر صقر</h2>
+      <p class="hint">المسافة بتتحسب على أقرب طريق على الخريطة. الأجرة = الكيلو × المسافة، ومقرّبة لأعلى ٥ ج، ومش أقل من الحد الأدنى.</p>
       <div class="row" style="margin-top:12px">
-        <div class="field"><label for="pSame">مشوار قصير (ج)</label><input id="pSame" type="number" min="0" step="1" inputmode="numeric"></div>
-        <div class="field"><label for="pCross">مشوار طويل (ج)</label><input id="pCross" type="number" min="0" step="1" inputmode="numeric"></div>
-        <div class="field"><label for="pCut">الحد بين القصير والطويل (كم)</label><input id="pCut" type="number" min="0.5" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="pKm">سعر الكيلو (ج)</label><input id="pKm" type="number" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label for="pMin">أقل مشوار (ج)</label><input id="pMin" type="number" min="0" step="1" inputmode="decimal"></div>
       </div>
     </div>
     <div class="card">
-      <h2>برا كفر صقر — بالكيلو</h2>
-      <p class="hint">لو مكان الركوب أو الوجهة بعيد عن أقرب مكان معروف في المدينة بالمسافة دي، المشوار بيتحسب بالكيلو، والمجموع بيتقرّب لفوق لأقرب ٥ ج. وعمره ما يقل عن سعر المشوار الطويل.</p>
+      <h2>الانتظار في المشوار المتعدد</h2>
+      <p class="hint">السواق بيدوس «انتظار» في كل وقفة. الدقايق المجانية في كل وقفة لوحدها، وبعدها بيتحسب على الدقيقة الكاملة بس.</p>
       <div class="row" style="margin-top:12px">
-        <div class="field"><label for="pPerKm">سعر الكيلو (ج)</label><input id="pPerKm" type="number" min="0" step="0.5" inputmode="decimal"></div>
-        <div class="field"><label for="pOutKm">يعتبر برا المدينة لو أبعد من (كم)</label><input id="pOutKm" type="number" min="0.5" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="pFree">دقايق مجانية في كل وقفة</label><input id="pFree" type="number" min="0" step="1" inputmode="decimal"></div>
+        <div class="field"><label for="pWaitMin">سعر دقيقة الانتظار (ج)</label><input id="pWaitMin" type="number" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label for="pMaxWait">أقصى وقفة (دقيقة)</label><input id="pMaxWait" type="number" min="1" step="1" inputmode="decimal"></div>
       </div>
     </div>
     <div class="card">
       <h2>جرّب السعر</h2>
       <div class="row" style="margin-top:10px;align-items:end">
-        <div class="field"><label for="pTryKm">مسافة المشوار (كم)</label><input id="pTryKm" type="number" min="0" step="0.1" value="6" inputmode="decimal"></div>
-        <div class="field"><label for="pTryOut">المكان</label><select id="pTryOut"><option value="0">جوه كفر صقر</option><option value="1" selected>برا كفر صقر</option></select></div>
+        <div class="field"><label for="pTryKm">المسافة (كم)</label><input id="pTryKm" type="number" min="0" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="pTryWait">انتظار إجمالي في وقفة واحدة (دقيقة)</label><input id="pTryWait" type="number" min="0" step="0.5" inputmode="decimal"></div>
       </div>
       <div class="banner b-note" id="pTryRes" style="margin-top:6px"></div>
       <div id="pExamples" style="margin-top:10px"></div>
     </div>
-    <div class="banner b-warn"><span>⚠</span><span>السعر الجديد بيتطبّق على الطلبات الجديدة بس. والمناطق اللي ليها سعر خاص في تبويب «المناطق» بتفضل بسعرها.</span></div>
+    <div class="card">
+      <h2>تقرير المشاوير المتعددة · آخر ٣٠ يوم</h2>
+      <div id="pMultiRep" class="hint">مفيش مشاوير متعددة لسه.</div>
+    </div>
+    <details class="card">
+      <summary style="cursor:pointer;font-weight:700">أماكن من غير إحداثيات (السعر القديم بالمناطق)</summary>
+      <p class="hint">بيستخدم بس لو مكان الركوب أو الوجهة مالوش مكان على الخريطة. الأحسن تحدد مكان كل الأماكن.</p>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label for="pSame">نفس المنطقة (ج)</label><input id="pSame" type="number" min="0" step="1" inputmode="decimal"></div>
+        <div class="field"><label for="pCross">بين منطقتين (ج)</label><input id="pCross" type="number" min="0" step="1" inputmode="decimal"></div>
+      </div>
+    </details>
+    <div class="banner b-warn"><span>⚠</span><span>السعر الجديد بيتطبّق على الطلبات الجديدة بس.</span></div>
     <button class="btn btn-primary btn-wide" id="pSave" type="button">حفظ التسعير</button>
   </section>
 
@@ -1295,33 +1307,54 @@
   });
 
   /* ---------- التسعير ---------- */
+  function prCfg(){ var c = S.cfgRaw || {}, n = function(v, d){ return (v === undefined || v === null || v === "" || !isFinite(+v) || +v < 0) ? d : +v; };
+    return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15, same: n(c.same, S.cfg.same), cross: n(c.cross, S.cfg.cross) }; }
+  var P_IDS = [["pKm","perKm"],["pMin","minFare"],["pFree","freeMin"],["pWaitMin","waitPerMin"],["pMaxWait","maxWaitMin"],["pSame","same"],["pCross","cross"]];
   function pVals(){
-    var n = function(id, d){ var v = parseFloat($(id).value); return isNaN(v) ? d : v; };
-    return { same: Math.round(n("pSame", S.cfg.same)), cross: Math.round(n("pCross", S.cfg.cross)), cutKm: n("pCut", S.cfg.cutKm), outPerKm: n("pPerKm", S.cfg.outPerKm), outKm: n("pOutKm", S.cfg.outKm) };
+    var d = prCfg(), o = {};
+    P_IDS.forEach(function(x){ var v = parseFloat($(x[0]).value); o[x[1]] = isNaN(v) ? d[x[1]] : v; });
+    o.same = Math.round(o.same); o.cross = Math.round(o.cross); return o;
   }
-  function pFare(v, km, out){ if(out) return Math.max(v.cross, Math.ceil((km * v.outPerKm - 1e-9) / 5) * 5); return km <= v.cutKm ? v.same : v.cross; }
+  var up5 = function(x){ return Math.ceil((x - 1e-9) / 5) * 5; };
+  function pFare(v, km, waitMin){
+    var w = Math.min(waitMin || 0, v.maxWaitMin), paid = Math.floor(Math.max(0, w - v.freeMin)) * v.waitPerMin, sum = km * v.perKm + paid;
+    return { paid: paid, sum: Math.round(sum * 10) / 10, fare: Math.max(v.minFare, up5(sum)) };
+  }
   function pRender(){
-    var v = pVals(), km = parseFloat($("pTryKm").value) || 0, out = $("pTryOut").value === "1";
-    var f = pFare(v, km, out);
-    $("pTryRes").innerHTML = '<span>◆</span><span>' + (out
-      ? km + ' كم × ' + v.outPerKm + ' ج = ' + (Math.round(km * v.outPerKm * 100) / 100) + ' ج ← <b>' + f + ' ج</b>'
-      : (km <= v.cutKm ? 'مشوار قصير (لحد ' + v.cutKm + ' كم)' : 'مشوار طويل (أكتر من ' + v.cutKm + ' كم)') + ' ← <b>' + f + ' ج</b>') + '</span>';
-    var ex = [3, 5, 8, 10, 15, 20];
-    $("pExamples").innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13.5px"><thead><tr><th style="text-align:start;padding:6px;border-bottom:1px solid var(--line)">برا المدينة</th>' + ex.map(function(k){ return '<th class="num" style="padding:6px;border-bottom:1px solid var(--line)">' + k + ' كم</th>'; }).join("") + '</tr></thead><tbody><tr><td style="padding:6px;color:var(--muted)">الأجرة</td>' + ex.map(function(k){ return '<td class="num" style="padding:6px;text-align:center;font-weight:700">' + pFare(v, k, true) + ' ج</td>'; }).join("") + '</tr></tbody></table>';
+    var v = pVals(), km = parseFloat($("pTryKm").value) || 0, wm = parseFloat($("pTryWait").value) || 0, f = pFare(v, km, wm);
+    $("pTryRes").innerHTML = '<span>◆</span><span>' + km + ' كم × ' + v.perKm + ' ج = ' + (Math.round(km * v.perKm * 10) / 10) + ' ج'
+      + (wm ? ' + انتظار ' + wm + ' د (' + Math.min(wm, v.freeMin) + ' ببلاش) = ' + f.paid + ' ج' : '') + ' · المجموع ' + f.sum + ' ← <b>' + f.fare + ' ج</b></span>';
+    var ex = [0.5, 1, 2, 3, 5, 8, 10, 15];
+    $("pExamples").innerHTML = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13.5px"><thead><tr><th style="text-align:start;padding:6px;border-bottom:1px solid var(--line)">المسافة</th>' + ex.map(function(k){ return '<th class="num" style="padding:6px;border-bottom:1px solid var(--line)">' + k + ' كم</th>'; }).join("") + '</tr></thead><tbody><tr><td style="padding:6px;color:var(--muted)">الأجرة</td>' + ex.map(function(k){ return '<td class="num" style="padding:6px;text-align:center;font-weight:700">' + pFare(v, k, 0).fare + ' ج</td>'; }).join("") + '</tr></tbody></table></div>';
+  }
+  /* تقرير المشاوير المتعددة: عددها، متوسط الانتظار في الوقفة، والسواقين اللي انتظارهم كتير بشكل غريب */
+  function multiReport(){
+    var since = Date.now() - 30 * 864e5, rs = (S.requests || []).filter(function(r){ return r.multi && r.status === "done" && (r.finishedAt || r.createdAt || 0) >= since; });
+    if(!rs.length){ $("pMultiRep").textContent = "مفيش مشاوير متعددة خلصت في آخر ٣٠ يوم."; return; }
+    var stops = 0, waitS = 0, paid = 0, by = {};
+    rs.forEach(function(r){ var b = r.bill || {}; stops += b.stops || 0; waitS += b.waitSec || 0; paid += b.waitCost || 0;
+      var d = by[r.driverId] = by[r.driverId] || { n:0, stops:0, waitS:0, paid:0 }; d.n++; d.stops += b.stops || 0; d.waitS += b.waitSec || 0; d.paid += b.waitCost || 0; });
+    var avg = stops ? waitS / stops / 60 : 0;
+    var rows = Object.keys(by).map(function(id){ var d = by[id], a = d.stops ? d.waitS / d.stops / 60 : 0, dr = TT.byId(S.drivers || [], id) || {};
+      return { name: dr.name || id, n: d.n, a: a, paid: d.paid, odd: d.stops >= 3 && a > Math.max(avg * 1.6, avg + 3) }; }).sort(function(x, y){ return y.a - x.a; });
+    $("pMultiRep").innerHTML = '<div class="stats" style="margin:6px 0 10px"><div><b class="num">' + rs.length + '</b><span>مشوار متعدد</span></div><div><b class="num">' + avg.toFixed(1) + ' د</b><span>متوسط الوقفة</span></div><div><b class="num">' + paid + ' ج</b><span>انتظار مدفوع</span></div></div>'
+      + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13.5px"><thead><tr><th style="text-align:start;padding:6px">السائق</th><th style="padding:6px">مشاوير</th><th style="padding:6px">متوسط الوقفة</th><th style="padding:6px">انتظار مدفوع</th></tr></thead><tbody>'
+      + rows.map(function(r){ return '<tr style="border-top:1px solid var(--line)' + (r.odd ? ';background:var(--crit-soft)' : '') + '"><td style="padding:6px">' + TT.esc(r.name) + (r.odd ? ' <span class="chip c-crit">انتظار كتير</span>' : '') + '</td><td class="num" style="padding:6px;text-align:center">' + r.n + '</td><td class="num" style="padding:6px;text-align:center">' + r.a.toFixed(1) + ' د</td><td class="num" style="padding:6px;text-align:center">' + r.paid + ' ج</td></tr>'; }).join("") + '</tbody></table></div>';
   }
   function renderPrice(){
-    [["pSame", S.cfg.same], ["pCross", S.cfg.cross], ["pCut", S.cfg.cutKm], ["pPerKm", S.cfg.outPerKm], ["pOutKm", S.cfg.outKm]].forEach(function(x){ if(document.activeElement !== $(x[0]) && !$(x[0]).dataset.dirty) $(x[0]).value = x[1]; });
-    pRender();
+    var d = prCfg();
+    P_IDS.forEach(function(x){ if(document.activeElement !== $(x[0]) && !$(x[0]).dataset.dirty) $(x[0]).value = d[x[1]]; });
+    if(!$("pTryKm").value) $("pTryKm").value = 3; if(!$("pTryWait").value) $("pTryWait").value = 5;
+    pRender(); try{ multiReport(); }catch(e){}
   }
-  ["pSame","pCross","pCut","pPerKm","pOutKm","pTryKm","pTryOut"].forEach(function(id){ $(id).addEventListener("input", function(){ if(id.indexOf("pTry") !== 0) $(id).dataset.dirty = "1"; pRender(); }); });
+  P_IDS.map(function(x){ return x[0]; }).concat(["pTryKm","pTryWait"]).forEach(function(id){ $(id).addEventListener("input", function(){ if(id.indexOf("pTry") !== 0) $(id).dataset.dirty = "1"; pRender(); }); });
   $("pSave").addEventListener("click", function(){
     var v = pVals();
-    if(!(v.same > 0 && v.cross > 0 && v.cutKm > 0 && v.outPerKm > 0 && v.outKm > 0)){ TT.toast("كل الخانات لازم تبقى أكبر من صفر"); return; }
-    if(v.cross < v.same && !confirm("سعر المشوار الطويل أقل من القصير. أكمّل؟")) return;
-    if(!confirm("هتحفظ التسعير الجديد:\nقصير " + v.same + " ج · طويل " + v.cross + " ج (الحد " + v.cutKm + " كم)\nبرا المدينة " + v.outPerKm + " ج/كم (أبعد من " + v.outKm + " كم)")) return;
+    if(!(v.perKm > 0 && v.minFare > 0 && v.maxWaitMin > 0 && v.freeMin >= 0 && v.waitPerMin >= 0)){ TT.toast("راجع الأرقام — الكيلو والحد الأدنى وأقصى وقفة لازم يبقوا أكبر من صفر"); return; }
+    if(!confirm("هتحفظ التسعير الجديد:\nالكيلو " + v.perKm + " ج · أقل مشوار " + v.minFare + " ج\nالانتظار: " + v.freeMin + " دقايق ببلاش، وبعدها " + v.waitPerMin + " ج للدقيقة الكاملة · أقصى وقفة " + v.maxWaitMin + " دقيقة")) return;
     var btn = this; btn.disabled = true;
     save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing" }, v)).then(function(){
-      ["pSame","pCross","pCut","pPerKm","pOutKm"].forEach(function(id){ delete $(id).dataset.dirty; });
+      P_IDS.forEach(function(x){ delete $(x[0]).dataset.dirty; });
       btn.disabled = false; btn.textContent = "اتحفظ ✓"; setTimeout(function(){ btn.textContent = "حفظ التسعير"; }, 1600);
     }).catch(function(e){ btn.disabled = false; TT.toast(e.message || "حصلت مشكلة"); });
   });
