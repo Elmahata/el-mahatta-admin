@@ -544,8 +544,7 @@ async function createRequest(env, b, source) {
   const pr = PR(cfg);
 
   /* السعر يُحسب هنا فقط — لا يُقرأ من العميل */
-  /* بالمسافة: خط مستقيم × ١٫٣ ≈ مسافة الشوارع. لحد cutKm (٢ كم) = سعر المشوار القصير، أكتر = الطويل.
-     لو مكان مالوش إحداثيات: نرجع للمناطق (نفس المنطقة = قصير، بين منطقتين = طويل) */
+  /* بالمسافة على الشارع × سعر الكيلو، مقرّب لأعلى ٥ ج، وأقل أجرة minFare. مكان من غير إحداثيات = أقل أجرة */
   const hasXY = (p) => p && p.lat != null && p.lng != null && isFinite(+p.lat) && isFinite(+p.lng);
   let same, fare, distKm = null, roadKmV = null;
   const outside = false, perKm = pr.perKm;
@@ -555,13 +554,8 @@ async function createRequest(env, b, source) {
     distKm = roadKmV != null ? Math.round(roadKmV * 10) / 10 : Math.round(meters({ lat: +from.lat, lng: +from.lng }, { lat: +to2.lat, lng: +to2.lng }) * 1.3 / 100) / 10;
     fare = Math.max(pr.minFare, up5(distKm * pr.perKm)); same = distKm <= 2;
   } else {
-    /* مكان من غير إحداثيات: نرجع لأسعار المناطق القديمة */
-    same = Boolean(from.zoneId && to2.zoneId && from.zoneId === to2.zoneId);
-    fare = same ? cfg.same : cfg.cross;
-    const zf = zones.find((z) => z.id === from.zoneId), zt = zones.find((z) => z.id === to2.zoneId);
-    if (same && zf && Number(zf.same) > 0) fare = Number(zf.same);
-    if (!same) { const zc = Math.max(Number(zf && zf.cross) || 0, Number(zt && zt.cross) || 0); if (zc > 0) fare = zc; }
-    fare = Math.max(pr.minFare, Number(fare) || pr.minFare);
+    /* مكان من غير إحداثيات: أقل أجرة (التسعير الموحّد بس — مفيش أسعار مناطق) */
+    same = true; fare = pr.minFare;
   }
   const now = Date.now();
 
