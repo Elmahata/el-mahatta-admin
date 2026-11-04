@@ -1529,6 +1529,8 @@ export async function onRequest({ request, env, params }) {
 
       if (sub === "feed" && method === "GET") {
         try { await runRepeats(env); } catch (e) {}
+        /* المسح الدوري (شات ٢٤ ساعة، أرشيف سنة) بيشتغل كمان مع السواقين — مرة كل ساعة بالكتير */
+        try { await purgeArchive(env); } catch (e) {}
         /* بنكتب «آخر ظهور» مرة كل ٣٠ ثانية بس — الكتابة كل ٤ ثواني كانت بتعمل ضغط (503) */
         if (Date.now() - (me.lastSeen || 0) > 30000) { me.lastSeen = Date.now(); await putDoc(env, "drivers", me.id, me); }
         const { requests } = await readDocs(env, ["requests"]);
@@ -1896,7 +1898,11 @@ export async function onRequest({ request, env, params }) {
     /* أرشيف المحذوفين (سنة) */
     if (route === "archive" && method === "GET") {
       archPurgedAt = 0; await purgeArchive(env);
-      if (sub) { const a = await getDoc(env, "archive", str(sub, 80)); return a ? json(a) : json({ error: "مش موجود" }, 404); }
+      if (sub) {
+        /* تنزيل ملف من الأرشيف محتاج الباسورد تاني */
+        if (!safeEqual(request.headers.get("x-pin"), adminPass(env))) return json({ error: "اكتب الباسورد تاني علشان تنزّل الملف", code: "step_up" }, 403);
+        const a = await getDoc(env, "archive", str(sub, 80)); return a ? json(a) : json({ error: "مش موجود" }, 404);
+      }
       const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind='archive' ORDER BY updated DESC LIMIT 500").all();
       return json({ items: (results || []).map((x) => { const a = JSON.parse(x.data); return { id: a.id, role: a.role, phone: a.phone, name: a.name, at: a.at, exp: a.exp, rides: (a.rides || []).length }; }) });
     }
@@ -2084,6 +2090,8 @@ ${JSON.stringify(stats)}`;
     }
 
     if (route === "state" && method === "GET") {
+      /* النسخة الاحتياطية (ملف بيتنزّل) محتاجة الباسورد تاني */
+      if (url.searchParams.get("backup") && !safeEqual(request.headers.get("x-pin"), adminPass(env))) return json({ error: "اكتب الباسورد تاني علشان تنزّل النسخة", code: "step_up" }, 403);
       const all = await readDocs(env, KINDS);
       const now = Date.now();
       await purgeArchive(env);
