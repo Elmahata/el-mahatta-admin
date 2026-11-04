@@ -56,7 +56,7 @@
         <input id="usr" type="text" dir="ltr" autocomplete="username" autocapitalize="off" spellcheck="false"></div>
       <div class="field"><label for="pin">الباسورد</label>
         <input id="pin" type="password" dir="ltr" autocomplete="current-password"></div>
-      <label style="display:flex;gap:10px;align-items:center;min-height:44px;margin:-4px 0 8px;cursor:pointer"><input type="checkbox" id="admRem" style="width:20px;height:20px;accent-color:var(--accent)"><span>افتكرني على الكمبيوتر ده (٣٠ يوم)</span></label>
+      <label style="display:none"><input type="checkbox" id="admRem" checked style="width:20px;height:20px;accent-color:var(--accent)"><span>افتكرني على الكمبيوتر ده (٣٠ يوم)</span></label>
       <button class="btn btn-primary btn-wide" id="enter">دخول</button>
       <p class="hint" id="gErr" style="margin-top:10px;color:var(--crit)" hidden></p>
     </div>
@@ -349,7 +349,42 @@
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
         <b>نسخة احتياطية</b>
         <p class="hint" style="margin:4px 0 8px">نزّل كل البيانات (السواقين، الأماكن، المناطق، الرحلات، البلاغات) في ملف واحد. احفظه على Google Drive مرة كل أسبوع.</p>
-        <button class="btn btn-primary" id="backupBtn" type="button">نزّل نسخة من البيانات</button>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button class="btn btn-primary" id="backupBtn" type="button">نزّل نسخة من البيانات</button>
+          <button class="btn btn-ghost" id="restoreBtn" type="button">استرجاع من نسخة</button>
+          <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+        </div>
+      </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+        <b>أرشيف الحسابات المحذوفة</b>
+        <p class="hint" style="margin:4px 0 8px">لما راكب أو سائق يحذف حسابه، سجل رحلاته وبياناته بيتحفظوا هنا سنة (للأمان والشكاوى وتسجيل التكاتك)، وبعدها بيتمسحوا لوحدهم.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <input id="archQ" inputmode="tel" dir="ltr" placeholder="ابحث برقم الموبايل" style="max-width:220px">
+          <button class="btn btn-ghost" id="archBtn" type="button">اعرض الأرشيف</button>
+        </div>
+        <div id="archList" style="margin-top:10px"></div>
+      </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+        <b>حساب مراجعة جوجل</b>
+        <p class="hint" style="margin:4px 0 8px">رقمين <b>جداد خالص</b> (مااتسجّلوش قبل كده) لمراجعين Google Play. الراكب بيدخل من غير واتساب، والسائق بكود ثابت، وطلباتهم مابتوصلش لسواقين حقيقيين. <b>دوس «إيقاف» أول ما جوجل يوافق.</b></p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <input id="rvRider" inputmode="tel" dir="ltr" placeholder="رقم الراكب" style="max-width:170px">
+          <input id="rvDriver" inputmode="tel" dir="ltr" placeholder="رقم السائق" style="max-width:170px">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+          <label style="display:flex;gap:10px;align-items:center;min-height:44px;cursor:pointer"><input type="checkbox" id="rvBypass" checked style="width:20px;height:20px;accent-color:var(--accent)"> راكب المراجعة يدخل من غير واتساب (لمراجعين جوجل — شيلها لو هتسجّل برقمك وتأكّد عادي)</label>
+          <label style="display:flex;gap:10px;align-items:center;min-height:44px;cursor:pointer"><input type="checkbox" id="rvIso" checked style="width:20px;height:20px;accent-color:var(--accent)"> اعزل حساب المراجعة عن السواقين والركاب الحقيقيين (شيلها في <b>فترة التجربة</b> علشان الطلبات توصل للكل عادي)</label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px">
+          <button class="btn btn-ghost" id="rvBtn" type="button">احفظ وشغّل</button>
+          <button class="btn btn-ghost" id="rvOff" type="button">إيقاف</button>
+        </div>
+        <p class="hint" id="rvOut" style="margin:8px 0 0" hidden></p>
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)">
+          <b>إنهاء فترة التجربة</b>
+          <p class="hint" style="margin:4px 0 8px">قبل الإطلاق النهائي: حسابات الركاب والسواقين <b>بتفضل زي ما هي</b> (الأسامي والصور والأكواد والدخول)، وبيتمسح السجل بس: المشاوير والشات والبلاغات والتقييمات والمشاوير المحفوظة. <b>نزّل نسخة من البيانات الأول.</b></p>
+          <button class="btn btn-ghost" id="trialEnd" type="button" style="color:var(--danger,#e5484d)">امسح سجل التجربة</button>
+        </div>
       </div>
       <div class="banner b-warn" style="margin-top:14px">
         <span>⚠</span><span>راجع تعريفة التوكتوك المعتمدة من محافظ الشرقية (قانون المرور ١٧/٢٠٢٤) قبل تثبيت السعر.</span>
@@ -384,14 +419,17 @@
   /* الرقم السرّي بيتحفظ لحد ما تقفل التاب بس، مش على الجهاز */
   /* بيتحفظ لحد ما تقفل البرنامج — أو ٣٠ يوم لو علّمت «افتكرني» على كمبيوترك الشخصي */
   try{
-    var sv = JSON.parse(sessionStorage.getItem(KEY) || localStorage.getItem(KEY) || "null");
-    if(sv && typeof sv === "object" && (!sv.exp || sv.exp > Date.now())){ pin = sv.p; user = sv.u || ""; } else { localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }
+    /* الدخول بيتحفظ لوحده: «تذكرة» من السيرفر بس — الباسورد نفسه مابيتحفظش على الجهاز */
+    var sv = JSON.parse(localStorage.getItem(KEY) || "null");
+    if(sv && typeof sv === "object" && sv.t){ pin = sv.t; } else { localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }
   }catch(e){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} }
 
-  function api(path, opts){ opts = opts || {}; opts.pin = pin; opts.user = user; return TT.api(path, opts); }
-  var save = function(kind, id, body){ return api("doc/"+kind+"/"+id, { method:"PUT", body:body }).then(load); };
+  function api(path, opts){ opts = opts || {}; opts.adminToken = pin; return TT.api(path, opts); }
+  var save = function(kind, id, body){ return api("doc/"+kind+"/"+id, { method:"PUT", body:body }).then(load, function(e){ TT.toast(e.message || "ماتحفظش — جرّب تاني"); load(); throw e; }); };
   var del  = function(kind, id){ return api("doc/"+kind+"/"+id, { method:"DELETE" }).then(load); };
   var clone = function(o){ return JSON.parse(JSON.stringify(o)); };
+  /* كود السائق: ٤ أرقام عشوائية آمنة */
+  function newCode(){ return String(1000 + (crypto.getRandomValues(new Uint16Array(1))[0] % 9000)); }
 
   /* ---------- دخول ---------- */
   $("enter").addEventListener("click", function(){
@@ -399,10 +437,9 @@
     if(!u || !v){ $("gErr").textContent = "اكتب اسم المستخدم والباسورد"; $("gErr").hidden = false; return; }
     var b = this; b.disabled = true; b.textContent = "…";
     TT.api("login", { method:"POST", body:{ user:u, pin:v } })
-      .then(function(){
-        pin = v; user = u;
-        var rem = $("admRem").checked, rec = JSON.stringify({ u:u, p:v, exp: rem ? Date.now() + 30 * 864e5 : 0 });
-        try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); (rem ? localStorage : sessionStorage).setItem(KEY, rec); }catch(e){}
+      .then(function(j){
+        pin = j.token; user = u; $("pin").value = "";
+        try{ sessionStorage.removeItem(KEY); localStorage.setItem(KEY, JSON.stringify({ t:j.token })); }catch(e){}
         start();
       })
       .catch(function(e){ $("gErr").textContent = e.message; $("gErr").hidden = false; })
@@ -606,7 +643,7 @@
           + '<button class="btn btn-ghost btn-sm" data-tiercap="'+TT.esc(d.id)+'" title="تنزيل المستوى بإيدك">'+(d.tierCap === "normal" ? "المستوى: عادي (يدوي)" : d.tierCap === "silver" ? "أقصاه فضي (يدوي)" : "المستوى: تلقائي")+'</button>'
           + '<button class="btn btn-ghost btn-sm" data-code="'+TT.esc(d.id)+'">كود جديد</button>'
           + '<a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" href="https://wa.me/'+TT.waNum(d.phone)+'?text='
-            + encodeURIComponent("كود دخولك على تطبيق المحطة للسائق: "+(d.code||"")+"\nالرابط: "+"https://el-mahatta.pages.dev/driver.html\nافتحه ودوس «فعّل صوت الطلبات».")+'">ابعتله الكود</a>'
+            + encodeURIComponent("كود دخولك على تطبيق المحطة للسائق: "+(d.code||"")+" (صالح ٢٤ ساعة ولمرة واحدة)"+"\nالرابط: "+"https://el-mahatta.pages.dev/driver.html\nافتحه ودوس «فعّل صوت الطلبات».")+'">ابعتله الكود</a>'
           + (d.hold ? '<button class="btn btn-primary btn-sm" data-unhold="'+TT.esc(d.id)+'">راجعت — رجّعه للشغل</button>' : '')
           + (d.deviceId ? '<button class="btn btn-ghost btn-sm" data-devreset="'+TT.esc(d.id)+'" title="الموبايل الجاي اللي يدخل بيتربط بالحساب">📱 مربوط بموبايل · فكّ الربط</button>' : '<span class="chip c-neutral">مش مربوط بموبايل لسه</span>')
           + '<button class="btn btn-ghost btn-sm" data-toggle="'+TT.esc(d.id)+'">'+(d.active===false?"تفعيل":"إيقاف")+'</button>'
@@ -859,6 +896,7 @@
         + '<div class="actions">'
         + '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(r.riderPhone)+'">اتصل بالراكب</a>'
         + (d ? '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(d.phone)+'">اتصل بالسائق</a>' : '')
+        + (r.status!=="closed" && r.deleteReq && (r.riderPhone || r.phone) ? '<button class="btn btn-ghost btn-sm" style="color:#A9382B" data-wipe="'+TT.esc(r.riderPhone || r.phone)+'" data-role="'+(r.deleteRole === "driver" ? "driver" : "rider")+'">اتأكدت — احذف كل بياناته</button>' : '')
         + (r.status!=="closed" ? '<button class="btn btn-ghost btn-sm" data-closerep="'+TT.esc(r.id)+'">اتحلّ — اقفل</button>' : '')
         + (r.status!=="closed" && d ? '<button class="btn btn-ghost btn-sm" style="color:#A9382B" data-confirmrep="'+TT.esc(r.id)+'" title="البلاغ صح — بيمنع السائق من الفضي ٣٠ يوم ومن الذهبي ٦٠ يوم">البلاغ صح — اقفل</button>' : '')
         + '</div></div>';
@@ -1070,6 +1108,7 @@
       renderAll(); renderJoins();
     }).catch(function(e){
       if(e.status === 401){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} location.reload(); }
+      else if(Date.now() - (load.errAt || 0) > 60000){ load.errAt = Date.now(); TT.toast("مش قادر يحدّث البيانات — اتأكد من النت"); }
     });
   }
 
@@ -1123,11 +1162,11 @@
     var dn2 = S.drivers.find(function(d){ return String(d.nid||"") === nid; });
     if(dn2){ TT.toast("الرقم القومي ده متسجّل لـ " + dn2.name); $("dNid").focus(); return; }
     var jn = (S.joins||[]).filter(function(j){ return l10(j.phone) === nph; });
-    var code = $("dCode").value.replace(/\D/g,"") || String(Math.floor(1000 + Math.random()*9000));
+    var code = $("dCode").value.replace(/\D/g,"").slice(0,4) || newCode();
     var id = TT.uid();
     save("drivers", id, { id:id, name:name, phone:$("dPhone").value.trim(), plate:$("dPlate").value.trim(),
       licence:$("dLic").value.trim(), licExpiry:$("dLicExp").value||null, nid:nid,
-      code:code, owner:$("dOwner").value.trim(), village:$("dVillage").value.trim(), active:true, online:false, createdAt:Date.now() })
+      code:code, codeExp:Date.now() + 864e5, owner:$("dOwner").value.trim(), village:$("dVillage").value.trim(), active:true, online:false, createdAt:Date.now() })
       .then(function(){ TT.toast("اتضاف — كوده " + code); jn.forEach(function(j){ del("joins", j.id); }); })
       .catch(function(e){ TT.toast(e.message); });
     ["dName","dPhone","dPlate","dLic","dLicExp","dCode","dOwner","dNid"].forEach(function(f){ $(f).value = ""; });
@@ -1142,13 +1181,69 @@
   /* مجاني ٣ شهور من يوم تسجيل كل مستخدم */
   function freeOf(u){ if(!S.cfg.creditOn) return true; return Date.now() < freeStart(u) + 90 * 864e5; }
   function freeStart(u){ return Math.max(+(u.joinedAt || u.createdAt || 0) || Date.now(), +S.cfg.creditOnAt || 0); }
-  $("backupBtn").addEventListener("click", function(){
-    var data = { app:"el-mahatta", at:new Date().toISOString(), zones:S.zones, places:S.places, drivers:S.drivers, requests:S.requests, reports:S.reports || [], config:S.cfg };
+  $("backupBtn").addEventListener("click", function(){ var btn = this; btn.disabled = true;
+   api("state").then(function(raw){
+    var data = { app:"el-mahatta", v:2, at:new Date().toISOString() }; Object.keys(raw || {}).forEach(function(k){ if(Array.isArray(raw[k])) data[k] = raw[k]; });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type:"application/json" }));
     a.download = "el-mahatta-backup-" + new Date().toISOString().slice(0,10) + ".json";
     document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
-    TT.toast("اتنزّلت النسخة ✓");
+    TT.toast("اتنزّلت النسخة ✓ — احفظها في مكان آمن (فيها أرقام قومية)");
+   }).catch(function(e){ TT.toast(e.message || "مانزلتش — جرّب تاني"); }).then(function(){ btn.disabled = false; });
+  });
+  $("archBtn").addEventListener("click", function(){
+    var q = $("archQ").value.replace(/\D/g,"").slice(-10), box = $("archList");
+    box.textContent = "…";
+    api("archive").then(function(j){
+      var it = (j.items || []).filter(function(x){ return !q || String(x.phone).indexOf(q) >= 0; });
+      if(!it.length){ box.innerHTML = '<p class="hint">مفيش حاجة في الأرشيف' + (q ? " بالرقم ده" : "") + '</p>'; return; }
+      box.innerHTML = it.map(function(x){
+        return '<div class="leg" style="gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)"><b>' + TT.esc(x.name || "—") + '</b><span dir="ltr">0' + TT.esc(x.phone) + '</span><span class="hint">' + (x.role === "driver" ? "سائق" : "راكب") + ' · ' + x.rides + ' مشوار · اتحذف ' + new Date(x.at).toLocaleDateString("ar-EG") + ' · بيتمسح ' + new Date(x.exp).toLocaleDateString("ar-EG") + '</span><button class="btn btn-ghost btn-sm" data-arch="' + TT.esc(x.id) + '">نزّل الملف</button></div>';
+      }).join("");
+    }).catch(function(e){ box.textContent = e.message || "خطأ"; });
+  });
+  $("archList").addEventListener("click", function(e){
+    var id = e.target.getAttribute && e.target.getAttribute("data-arch"); if(!id) return;
+    api("archive/" + encodeURIComponent(id)).then(function(x){
+      var l = document.createElement("a"); l.href = URL.createObjectURL(new Blob([JSON.stringify(x, null, 1)], { type:"application/json" }));
+      l.download = "archive-" + x.role + "-0" + x.phone + ".json"; document.body.appendChild(l); l.click(); setTimeout(function(){ URL.revokeObjectURL(l.href); l.remove(); }, 500);
+    }).catch(function(err){ TT.toast(err.message); });
+  });
+  function rvSave(on, b){
+    b.disabled = true;
+    api("admin-review", { method:"POST", retry:false, body:{ riderPhone:$("rvRider").value, driverPhone:$("rvDriver").value, on:on, bypass:$("rvBypass").checked, isolate:$("rvIso").checked } }).then(function(j){
+      $("rvOut").hidden = false;
+      $("rvOut").textContent = j.on ? "شغّال ✓ — " + (j.bypass ? "راكب: " + j.riderPhone + " (من غير واتساب)  ·  " : "الراكب بيسجّل عادي بواتساب  ·  ") + "سائق: " + j.driverPhone + " · الكود الثابت: " + j.code + (j.isolate ? "  ·  معزول عن الحقيقيين" : "  ·  ⚠ فترة التجربة: الطلبات بتوصل لكل السواقين — بتقفل لوحدها " + (j.isoUntil ? new Date(j.isoUntil).toLocaleDateString("ar-EG") : "بعد ٧ أيام"))
+        : "اتوقف ✓ — الحسابين التجريبيين مش هيدخلوا تاني لحد ما تشغّلهم.";
+      load();
+    }).catch(function(e){ TT.toast(e.message); }).then(function(){ b.disabled = false; });
+  }
+  $("rvBypass").addEventListener("change", function(){ $("rvRider").disabled = !this.checked; });
+  $("rvBtn").addEventListener("click", function(){ rvSave(true, this); });
+  $("rvOff").addEventListener("click", function(){ if(confirm("توقف حساب مراجعة جوجل؟")) rvSave(false, this); });
+  $("trialEnd").addEventListener("click", function(){
+    var b = this, c = prompt("هيتمسح كل المشاوير والتقييمات، والحسابات هتفضل. اكتب «امسح» للتأكيد");
+    if(c === null) return; b.disabled = true;
+    api("admin-trial-end", { method:"POST", retry:false, body:{ confirm:c.trim() } }).then(function(j){ TT.toast("اتمسح سجل التجربة ✓ (" + j.rides + " مشوار) — الحسابات زي ما هي"); load(); })
+      .catch(function(e){ TT.toast(e.message); }).then(function(){ b.disabled = false; });
+  });
+  /* الاسترجاع بيرجّع الناقص بس — اللي موجود مابيتغيّرش ولا بيتمسح */
+  $("restoreBtn").addEventListener("click", function(){ $("restoreFile").value = ""; $("restoreFile").click(); });
+  $("restoreFile").addEventListener("change", function(){
+    var f = this.files && this.files[0]; if(!f) return;
+    f.text().then(function(txt){
+      var j; try{ j = JSON.parse(txt); }catch(e){ throw new Error("الملف ده مش نسخة صحيحة"); }
+      if(!j || j.app !== "el-mahatta") throw new Error("الملف ده مش نسخة من المحطة");
+      if(!Array.isArray(j.config) && j.config && typeof j.config === "object") j.config = [Object.assign({ id:"pricing" }, j.config)];
+      /* الأول بنسأل السيرفر هيرجّع كام — من غير ما يكتب حاجة */
+      return api("restore", { method:"POST", retry:false, body:Object.assign({}, j, { dry:true }) }).then(function(p){
+        var names = { drivers:"سواقين", places:"أماكن", zones:"مناطق", requests:"مشاوير", reports:"بلاغات", riders:"ركاب", config:"إعدادات", joins:"طلبات انضمام" };
+        var lines = Object.keys(p.summary || {}).filter(function(k){ return p.summary[k].add; }).map(function(k){ return "• " + (names[k] || k) + ": " + p.summary[k].add; });
+        if(!p.add){ alert("كل اللي في النسخة دي موجود بالفعل — مفيش حاجة ناقصة ترجع."); return; }
+        if(!confirm("نسخة " + String(j.at || "").slice(0,10) + "\n\nهيرجّع " + p.add + " سجل ناقص:\n" + lines.join("\n") + "\n\nاللي موجود دلوقتي (" + p.keep + ") مش هيتغيّر. نكمّل؟")) return;
+        return api("restore", { method:"POST", retry:false, body:j }).then(function(r){ TT.toast("اترجع " + r.count + " سجل ✓"); load(); });
+      });
+    }).catch(function(e){ TT.toast(e.message || "خطأ"); });
   });
   /* بيضيف الأماكن المشهورة الناقصة، وبعدين بيدوّر على مكان كل نقطة ناقصة على الخريطة لوحده (واحدة كل ثانية — شرط الخدمة المجانية) */
   $("seedPlaces").addEventListener("click", function(){
@@ -1362,7 +1457,7 @@
 
   document.addEventListener("click", function(e){
     if(!e.target.closest) return;
-    var el = e.target.closest("[data-cancel],[data-renew],[data-topup],[data-code],[data-toggle],[data-deld],[data-renz],[data-delz],[data-sel],[data-renp],[data-delp],[data-closerep],[data-confirmrep],[data-tiercap],[data-devok],[data-devno],[data-devreset],[data-unhold]");
+    var el = e.target.closest("[data-cancel],[data-renew],[data-topup],[data-code],[data-toggle],[data-deld],[data-renz],[data-delz],[data-sel],[data-renp],[data-delp],[data-closerep],[data-confirmrep],[data-tiercap],[data-devok],[data-devno],[data-devreset],[data-unhold],[data-wipe]");
     if(!el) return;
     var id, c;
     if((id = el.getAttribute("data-devok"))){
@@ -1413,18 +1508,26 @@
     } else if((id = el.getAttribute("data-tiercap"))){
       c = clone(TT.byId(S.drivers,id)); var nx = { "":"silver", silver:"normal", normal:"" }[c.tierCap || ""];
       c.tierCap = nx; save("drivers", id, c).then(function(){ TT.toast(nx === "normal" ? "المستوى اتنزّل لـ «عادي»" : nx === "silver" ? "أقصى مستوى: فضي" : "المستوى رجع تلقائي"); });
+    } else if((id = el.getAttribute("data-wipe"))){
+      if(!confirm("حذف كل بيانات الراكب صاحب الرقم " + id + "؟\nاتأكد الأول إنه هو اللي طالب. مايتعملهوش رجوع.")) return;
+      el.disabled = true;
+      api("admin-wipe", { method:"POST", retry:false, body:{ phone:id, role: el.getAttribute("data-role") || "rider" } }).then(function(r){ TT.toast("اتحذف ✓ (" + r.cleared + " مشوار)"); load(); }).catch(function(e){ TT.toast(e.message); });
     } else if((id = el.getAttribute("data-closerep"))){
       c = clone(TT.byId(S.reports,id)); c.status = "closed"; c.closedAt = Date.now(); save("reports", id, c);
     } else if((id = el.getAttribute("data-cancel"))){
       if(!confirm("إلغاء المشوار؟")) return;
-      c = clone(TT.byId(S.requests,id)); c.status = "cancelled"; save("requests", id, c);
+      api("admin-cancel", { method:"POST", retry:false, body:{ requestId:id } }).then(function(){ TT.toast("اتلغى ✓"); load(); }).catch(function(e){ TT.toast(e.message); load(); });
     } else if((id = el.getAttribute("data-code"))){
-      c = clone(TT.byId(S.drivers,id)); c.code = String(Math.floor(1000 + Math.random()*9000));
-      save("drivers", id, c).then(function(){ TT.toast("الكود الجديد: " + c.code); });
+      c = clone(TT.byId(S.drivers,id)); c.code = newCode(); c.codeExp = Date.now() + 864e5; c.codeUsed = null; c.sess = null;
+      save("drivers", id, c).then(function(){ TT.toast("الكود الجديد: " + c.code + " — صالح ٢٤ ساعة"); });
     } else if((id = el.getAttribute("data-toggle"))){
       c = clone(TT.byId(S.drivers,id)); c.active = (c.active === false); save("drivers", id, c);
     } else if((id = el.getAttribute("data-deld"))){
-      if(confirm("حذف السائق نهائياً؟")) del("drivers", id);
+      var dd = TT.byId(S.drivers, id);
+      if(dd && confirm("حذف السائق " + (dd.name || "") + " نهائياً؟\nبياناته ورحلاته هتروح لأرشيف الإدارة سنة، وبعدها تتمسح.")){
+        el.disabled = true;
+        api("admin-wipe", { method:"POST", retry:false, body:{ phone:dd.phone, role:"driver" } }).then(function(){ TT.toast("اتحذف ✓ — في الأرشيف"); load(); }).catch(function(err){ el.disabled = false; TT.toast(err.message); });
+      }
     } else if((id = el.getAttribute("data-delz"))){
       if(confirm("حذف المنطقة؟")) del("zones", id);
     } else if((id = el.getAttribute("data-renz"))){
@@ -1455,8 +1558,8 @@
     var t = e.target; if(!t.getAttribute) return;
     var id = t.getAttribute("data-assign");
     if(id && t.value){
-      var r = clone(TT.byId(S.requests,id)); r.driverId = t.value; r.status = "assigned"; r.assignedAt = Date.now();
-      save("requests", id, r); return;
+      api("admin-assign", { method:"POST", retry:false, body:{ requestId:id, driverId:t.value } }).then(function(){ TT.toast("اتعيّن ✓"); load(); }).catch(function(e){ TT.toast(e.message); load(); });
+      return;
     }
     id = t.getAttribute("data-pz");
     if(id){ var p = clone(TT.byId(S.places,id)); p.zoneId = t.value; save("places", id, p); return; }
@@ -1495,7 +1598,11 @@
     }
     load();
     if(timer) clearInterval(timer);
-    timer = setInterval(function(){ if(!document.hidden) load(); }, 4000);
+    /* التحديث التلقائي بيستنى لو بتكتب في خانة — علشان اللي بتكتبه مايضيعش */
+    timer = setInterval(function(){
+      var ae = document.activeElement, typing = ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && !/^(checkbox|radio|button|file)$/.test(ae.type || "");
+      if(!document.hidden && !typing) load();
+    }, 4000);
   }
 
   if(pin) start();
