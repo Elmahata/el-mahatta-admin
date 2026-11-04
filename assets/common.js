@@ -97,6 +97,10 @@
       var headers = { "content-type": "application/json" };
       if (opts.pin) headers["x-pin"] = opts.pin;
       if (opts.user) headers["x-user"] = encodeURIComponent(opts.user);
+      if (opts.adminToken) headers["x-admin-token"] = opts.adminToken;
+      /* الطلب الجديد بياخد مفتاح ثابت: لو النت فصل واتبعت تاني، السيرفر بيرجّع نفس الطلب بدل ما يعمل طلبين */
+      if ((path === "request" || path === "phone-request") && opts.body && !opts.body.reqKey)
+        opts.body.reqKey = Date.now().toString(36) + Array.from(crypto.getRandomValues(new Uint8Array(10)), function (b) { return b.toString(16).padStart(2, "0"); }).join("");
       if (opts.verify && T.verify) {
         var v = opts.verify; delete opts.verify;
         return T.verify(v.phone, v.role).then(function (tok) { opts.session = tok; return T.api(path, opts); });
