@@ -94,6 +94,12 @@ async function putDoc(env, kind, id, data) {
      ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data, updated=excluded.updated`
   ).bind(kind, id, JSON.stringify(data), Date.now()).run();
 }
+/* نفس الحاجة بس كـ «خطوة» جوه batch — كله يتنفّذ مع بعض أو مايتنفّذش خالص */
+const putSt = (env, kind, id, data) => env.DB.prepare(
+  `INSERT INTO docs (kind,id,data,updated) VALUES (?,?,?,?)
+   ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data, updated=excluded.updated`
+).bind(kind, id, JSON.stringify(data), Date.now());
+const delSt = (env, kind, id) => env.DB.prepare("DELETE FROM docs WHERE kind=? AND id=?").bind(kind, id);
 
 async function parseBody(request) {
   const raw = await request.text();
@@ -107,6 +113,36 @@ const adminUser = (env) => String(env.ADMIN_USER || "admin").trim().toLowerCase(
 const hdrUser = (req) => { try { return decodeURIComponent(req.headers.get("x-user") || "").trim().toLowerCase(); } catch (e) { return ""; } };
 const isAdmin = (req, env) =>
   Boolean(adminPass(env)) && safeEqual(hdrUser(req), adminUser(env)) && safeEqual(req.headers.get("x-pin"), adminPass(env));
+const sha = async (s) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)))), (b) => b.toString(16).padStart(2, "0")).join("");
+/* الإدارة: الباسورد بيتبعت مرة واحدة عند الدخول، وبعدها «تذكرة» عشوائية بتتجدد لوحدها طول ما البورتال بيتفتح (٣٠ يوم من آخر استخدام). الخروج بيلغيها */
+const ADMIN_TTL = 30 * 864e5;
+async function adminOk(req, env) {
+  const t = String(req.headers.get("x-admin-token") || "");
+  if (t.length < 32) return false;
+  const s = await getDoc(env, "adminsess", await sha(t));
+  if (!s || s.exp < Date.now()) return false;
+  if (s.exp - Date.now() < ADMIN_TTL - 864e5) { s.exp = Date.now() + ADMIN_TTL; await putDoc(env, "adminsess", s.id, s); }
+  return true;
+}
+/* دخول السائق: الكود ٤ أرقام صالح ٢٤ ساعة ولمرة واحدة. ٥ محاولات غلط ← يتقفل ربع ساعة. بعد الدخول بياخد تذكرة دايمة على موبايله */
+const DRV_TRIES = 5, DRV_LOCK_MS = 15 * 6e4, CODE_TTL = 24 * 36e5;
+const LOCK_MSG = "محاولات كتير غلط — جرّب بعد ربع ساعة";
+const codeLive = (d) => !d.codeUsed && Boolean(d.codeExp) && d.codeExp > Date.now();
+/* الأكواد القديمة اللي مالهاش صلاحية: أول مرة تتشاف بتاخد ٢٤ ساعة من دلوقتي */
+async function stampCode(env, d) { if (d.code && !d.codeExp && !d.codeUsed) { d.codeExp = Date.now() + CODE_TTL; await putDoc(env, "drivers", d.id, d); } }
+async function drvLock(env, phone) { const l = await getDoc(env, "loginfail", "drv-" + phone); return Boolean(l && l.until > Date.now()); }
+async function drvFail(env, phone) {
+  /* العدّ بيحصل جوه قاعدة البيانات نفسها — محاولتين في نفس اللحظة بيتحسبوا اتنين */
+  const k = "drv-" + phone, now = Date.now();
+  const row = await env.DB.prepare(`INSERT INTO docs (kind,id,data,updated) VALUES ('loginfail',?,json_object('id',?,'n',1,'until',0),?)
+    ON CONFLICT(kind,id) DO UPDATE SET updated=excluded.updated, data=json_set(data,
+      '$.n', CASE WHEN IFNULL(json_extract(data,'$.until'),0)>0 AND json_extract(data,'$.until')<=? THEN 1 ELSE IFNULL(json_extract(data,'$.n'),0)+1 END,
+      '$.until', CASE WHEN IFNULL(json_extract(data,'$.until'),0)>0 AND json_extract(data,'$.until')<=? THEN 0 ELSE IFNULL(json_extract(data,'$.until'),0) END)
+    RETURNING data`).bind(k, k, now, now, now).first();
+  const l = row ? JSON.parse(row.data) : { id: k, n: 1, until: 0 };
+  if (l.n >= DRV_TRIES) { l.until = now + DRV_LOCK_MS; l.n = 0; await putDoc(env, "loginfail", k, l); }
+  return l;
+}
 
 /** السائق يُعرَّف برقم موبايله + كود خاص به تضبطه الإدارة + الموبايل اللي حسابه مربوط بيه */
 const devOf = (v) => str(v, 40).replace(/[^\w-]/g, "");
@@ -114,11 +150,19 @@ const HOLD_MSG = "حسابك متوقف مؤقتاً لحد ما الإدارة 
 const DEV_MSG = "حسابك مربوط بموبايل تاني. لو غيّرت موبايلك، ادخل من الموبايل الجديد والإدارة توافق";
 async function getDriverEx(req, env) {
   const phone = digits(req.headers.get("x-driver-phone"));
-  const code = digits(req.headers.get("x-driver-code"));
+  const code = String(req.headers.get("x-driver-code") || "").trim();
   if (!phone || !code) return { d: null };
   const { drivers } = await readDocs(env, ["drivers"]);
   const d = drivers.find((x) => digits(x.phone) === phone);
-  if (!d || d.active === false || !d.code || !safeEqual(code, String(d.code))) return { d: null };
+  if (!d || d.active === false) return { d: null };
+  if (code.length >= 32) {
+    if (!d.sess || !safeEqual(await sha(code), d.sess)) return { d: null };
+  } else {
+    /* موبايل لسه بالكود القديم (قبل التحديث) — بنعدّيه بنفس القفل علشان محدش يجرّب أكواد */
+    if (await drvLock(env, phone)) return { d: null, why: LOCK_MSG };
+    await stampCode(env, d);
+    if (!d.code || !codeLive(d) || !safeEqual(digits(code), String(d.code))) { await drvFail(env, phone); return { d: null }; }
+  }
   if (d.hold) return { d: null, why: HOLD_MSG };
   const dev = devOf(req.headers.get("x-driver-device"));
   if (d.deviceId && dev !== d.deviceId) return { d: null, why: DEV_MSG };
@@ -128,7 +172,7 @@ async function getDriverEx(req, env) {
 }
 async function getDriver(req, env) { return (await getDriverEx(req, env)).d; }
 /* حقول السيرفر بس اللي بيكتبها — لو الإدارة حفظت نسخة قديمة من السائق مانمسحهاش. الإدارة بتمسحها بإنها تبعتها null */
-const DRIVER_SERVER_KEYS = ["deviceId", "deviceAt", "pendingDevice", "hold", "impostorBy"];
+const DRIVER_SERVER_KEYS = ["deviceId", "deviceAt", "pendingDevice", "hold", "impostorBy", "sess", "sessAt", "codeUsed"];
 
 /* نظام الرصيد: السائق بيشحن رصيد كاش عند الإدارة/الوكيل، وكل مشوار بيخلص بيتخصم منه tripFee.
    مجاني لحد ما الإدارة تشغّله (creditOn) وييجي يوم البداية (creditFrom). لو الرصيد أقل من رسم مشوار — الطلبات بتوقف. */
@@ -428,6 +472,8 @@ const busySet = (requests) => new Set(requests.filter((x) => x.status === "assig
 const ASSIGN_SQL = `UPDATE docs SET data=?, updated=? WHERE kind='requests' AND id=? AND json_extract(data,'$.status')='pending'
   AND NOT EXISTS (SELECT 1 FROM docs AS o WHERE o.kind='requests' AND o.id<>? AND json_extract(o.data,'$.driverId')=? AND json_extract(o.data,'$.status')='assigned')`;
 async function assignTo(env, r, d) {
+  /* حسابات مراجعة جوجل معزولة: سائق تجريبي ماياخدش طلب حقيقي، والعكس — إلا في «فترة التجربة» */
+  if (Boolean(d.reviewer) !== Boolean(r.review) && (await isolateOn(env))) return null;
   const next = { ...r, status: "assigned", driverId: d.id, assignedAt: Date.now() };
   const res = await env.DB.prepare(ASSIGN_SQL).bind(JSON.stringify(next), Date.now(), r.id, r.id, d.id).run();
   if (!res.meta || res.meta.changes !== 1) return null;
@@ -457,7 +503,9 @@ async function pushDrivers(env, r) {
   try {
     const { drivers, requests } = await readDocs(env, ["drivers", "requests"]);
     const busy = new Set(requests.filter((x) => x.status === "assigned").map((x) => x.driverId));
-    const list = drivers.filter((d) => d.active !== false && d.online !== false && !busy.has(d.id) && Date.now() - (d.lastSeen || 0) < 12 * 3600e3 && inReach(r, d, 0));
+    /* نفس فصل حساب المراجعة: طلب حقيقي مايوصلش إشعاره لسائق المراجعة، والعكس */
+    const iso = await isolateOn(env);
+    const list = drivers.filter((d) => (!iso || Boolean(d.reviewer) === Boolean(r.review)) && d.active !== false && d.online !== false && !busy.has(d.id) && Date.now() - (d.lastSeen || 0) < 12 * 3600e3 && inReach(r, d, 0));
     const body = (r.from && r.from.label ? r.from.label : "") + " ← " + (r.to && r.to.label ? r.to.label : "") + " · " + r.fare + " ج";
     await Promise.all(list.map((d) => pushTo(env, "driver", l10(d.phone), { kind: "request", title: "طلب جديد · " + r.fare + " ج", body, url: "/driver.html", tag: "req" })));
   } catch (e) {}
@@ -475,6 +523,8 @@ async function needSession(request, env, phone, role) {
   const s = t ? await getDoc(env, "sessions", t) : null;
   if (!s || s.role !== role || s.phone !== l10(phone) || Date.now() - s.at > SESSION_TTL)
     return json({ error: "أكّد رقمك الأول — دوس تاني", reverify: role }, 401);
+  /* الدخول بيفضل محفوظ: كل ما يستخدم التطبيق المدة بتتجدد */
+  if (Date.now() - s.at > 7 * 864e5) { s.at = Date.now(); await putDoc(env, "sessions", t, s); }
   return null;
 }
 async function sendOtp(env, phone, code) {
@@ -518,6 +568,67 @@ function meterView(r, pr, now) {
   const km = +(((r.meter && r.meter.km) || 0)).toFixed(2), distCost = +(km * pr.perKm).toFixed(1), waitCost = paidMin * pr.waitPerMin, sum = +(distCost + waitCost).toFixed(1);
   return { km, distCost, paidMin, waitCost, freeSec: Math.round(freeMs / 1000), waitSec: Math.round(totalMs / 1000), stops: ws.length, sum, final: Math.max(pr.minFare, up5(sum)),
     waitOn: r.waitOn ? { s: r.waitOn.s } : null, weak: Boolean(r.meter && r.meter.weakAt && now - r.meter.weakAt < 20000), now, ...pr };
+}
+
+/* حساب مراجعة جوجل: رقم راكب تجريبي بيدخل من غير واتساب، وطلباته بتظهر لسائق المراجعة بس (مابتوصلش لسواقين حقيقيين) */
+async function isReview(env, phone) {
+  const p = l10(phone); if (p.length < 10) return false;
+  const c = await getDoc(env, "config", "review");
+  return Boolean(c && c.on !== false && c.bypass !== false && c.riderPhone && l10(c.riderPhone) === p);
+}
+/* «فترة التجربة»: لو العزل مقفول، سائق المراجعة بيشوف الطلبات الحقيقية وبيظهر للركاب، وطلبات راكب المراجعة بتوصل لكل السواقين */
+const ISO_OFF_MS = 7 * 864e5;
+async function isolateOn(env) {
+  const c = await getDoc(env, "config", "review");
+  if (!c || c.isolate !== false) return true;
+  /* فترة التجربة بتقفل لوحدها بعد ٧ أيام علشان ماتتنسيش مفتوحة */
+  return Boolean(c.isoOffAt && Date.now() - c.isoOffAt > ISO_OFF_MS);
+}
+async function isReviewOld(env, phone) {
+  const p = l10(phone); if (p.length < 10) return false;
+  const c = await getDoc(env, "config", "review");
+  return Boolean(c && c.on !== false && l10(c.riderPhone) === p);
+}
+/* أرشيف الإدارة: لما حد يحذف حسابه، سجل رحلاته وبياناته الأساسية بتتحفظ هنا سنة (الأمان والشكاوى وتسجيل التكاتك)،
+   وبعدها بتتمسح لوحدها. البورتال بس اللي بيشوفه */
+const ARCH_MS = 365 * 864e5;
+async function archive(env, role, phone, data) {
+  const id = role + "_" + l10(phone) + "_" + Date.now().toString(36);
+  await putDoc(env, "archive", id, { id, role, phone: l10(phone), at: Date.now(), exp: Date.now() + ARCH_MS, ...data });
+}
+let archPurgedAt = 0;
+async function purgeArchive(env) {
+  if (Date.now() - archPurgedAt < 36e5) return;
+  archPurgedAt = Date.now();
+  /* مسح دوري: الأرشيف اللي خلصت سنته، والشات بعد ٢٤ ساعة (زي سياسة الخصوصية)، ومفاتيح الطلبات والعدّادات القديمة */
+  const q = (sql, ...a) => env.DB.prepare(sql).bind(...a).run().catch(() => {});
+  await q("DELETE FROM docs WHERE kind='archive' AND json_extract(data,'$.exp')<?", Date.now());
+  await q("DELETE FROM docs WHERE kind='chat' AND updated<?", Date.now() - 864e5);
+  await q("DELETE FROM docs WHERE kind IN ('rl','reqkey') AND updated<?", Date.now() - 2 * 864e5);
+}
+/* اللي بيتحفظ في الأرشيف بس (زي ما سياسة الخصوصية بتقول): مفيش أكواد ولا جلسات ولا بيانات الجهاز.
+   مقصود يفضل: رقم التليفون والاسم (الشكاوى)، وللسائق الرقم القومي والرخصة ورقم التوكتوك (تسجيل التكاتك) — سنة وبعدين يتمسح */
+const pickKeys = (o, ks) => Object.fromEntries(ks.filter((k) => o && o[k] !== undefined).map((k) => [k, o[k]]));
+const ARCH_RIDE = (r) => ({ ...pickKeys(r, ["id", "createdAt", "startedAt", "finishedAt", "cancelledAt", "status", "cancelReason", "fare", "driverId", "riderName", "riderPhone", "bookerPhone", "rating", "multi", "outside"]), from: r.from && r.from.label, to: r.to && r.to.label });
+const ARCH_REPORT = (x) => pickKeys(x, ["id", "kind", "status", "note", "fare", "asked", "driverId", "requestId", "createdAt", "closedAt"]);
+const ARCH_DRIVER = (d) => pickKeys(d, ["id", "name", "phone", "plate", "licence", "licExpiry", "nid", "owner", "village", "createdAt", "joinedAt", "rideCount", "releaseCount", "ratingSum", "ratingCount"]);
+/* حذف حساب السائق: بياناته ورحلاته بتروح للأرشيف، وبعدين كارت السائق والإشعارات والجلسة بيتمسحوا */
+async function wipeDriver(env, d) {
+  const p10 = l10(d.phone);
+  const { requests, consents } = await readDocs(env, ["requests", "consents"]);
+  const mine = requests.filter((r) => r.driverId === d.id);
+  if (mine.some((r) => r.status === "assigned")) return { error: "في مشوار شغال — خلّصه الأول", status: 409 };
+  const { reports } = await readDocs(env, ["reports"]);
+  const aid = "driver_" + p10 + "_" + Date.now().toString(36);
+  /* كله مرة واحدة: الأرشيف + المسح. لو أي خطوة فشلت مفيش حاجة بتتغيّر */
+  await env.DB.batch([
+    putSt(env, "archive", aid, { id: aid, role: "driver", phone: p10, at: Date.now(), exp: Date.now() + ARCH_MS, name: d.name || "", driver: ARCH_DRIVER(d),
+      rides: mine.slice(-500).map(ARCH_RIDE).map(({ riderPhone, bookerPhone, ...x }) => x),
+      reports: (reports || []).filter((x) => x.driverId === d.id).map(ARCH_REPORT) }),
+    delSt(env, "drivers", d.id), delSt(env, "push", "driver_" + p10), delSt(env, "loginfail", "drv-" + digits(d.phone)),
+    ...(consents || []).filter((c) => c.role === "driver" && l10(c.phone) === p10).map((c) => putSt(env, "consents", c.id, { ...c, phone: "", name: "", deletedAt: Date.now() })),
+  ]);
+  return { ok: true, rides: mine.length };
 }
 
 async function createRequest(env, b, source) {
@@ -593,9 +704,10 @@ async function createRequest(env, b, source) {
   const discount = Math.min(refDiscount, fare - 5 > 0 ? refDiscount : 0);
   fare -= discount;
 
+  const rv = await isReview(env, b.forOther ? b.bookerPhone : phone);
   const id = uid(), tok = newToken(), share = newToken().slice(0, 12);
   await putDoc(env, "requests", id, {
-    id, token: tok, shareToken: share, code: rideCode(), source,
+    id, token: tok, shareToken: share, code: rideCode(), source, reqKey: str(b.reqKey, 40), review: rv,
     riderName: name, riderPhone: phone, note: str(b.note, 140), from, to: to2, multi, ip: str(b.__ip, 64),
     fare, sameZone: same, distKm, roadKm: roadKmV != null, outside, perKm, status: "pending", driverId: "",
     createdAt: now, day: todayStr(), scheduledAt,
@@ -603,8 +715,87 @@ async function createRequest(env, b, source) {
     discount, refBy: discount && refBy ? refBy : "", refCredit: Boolean(discount && !refBy),
     repeatId: source === "repeat" ? str(b.repeatId, 40) : "", prefDriver: source === "repeat" ? str(b.prefDriverId, 40) : "",
   });
-  if (!scheduledAt || scheduledAt - now < 15 * 60e3) await pushDrivers(env, { from, to: to2, fare: multi ? "بالعدّاد" : fare });
+  if (!scheduledAt || scheduledAt - now < 15 * 60e3) await pushDrivers(env, { from, to: to2, fare: multi ? "بالعدّاد" : fare, review: rv });
   return { ok: true, id, token: tok, shareToken: share, fare, multi, sameZone: same, distKm, outside, perKm, discount, scheduledAt, refCode: refCode(phone) };
+}
+
+/* لو النت فصل والطلب اتبعت تاني بنفس المفتاح: بنرجّع نفس الطلب بدل ما نعمل واحد جديد */
+async function dupReq(env, key) {
+  key = str(key, 40);
+  if (key.length < 12) return null;
+  const row = await env.DB.prepare("SELECT data FROM docs WHERE kind='requests' AND json_extract(data,'$.reqKey')=? LIMIT 1").bind(key).first();
+  if (!row) return null;
+  const r = JSON.parse(row.data);
+  return { ok: true, id: r.id, token: r.token, shareToken: r.shareToken, fare: r.fare, multi: Boolean(r.multi), sameZone: r.sameZone, distKm: r.distKm, outside: r.outside, perKm: r.perKm, discount: r.discount || 0, scheduledAt: r.scheduledAt || null, refCode: refCode(r.riderPhone), dup: true };
+}
+/* المفتاح بيتحجز في قاعدة البيانات الأول (مرة واحدة بس) — لو طلبين وصلوا في نفس اللحظة، واحد بس بيعدّي */
+/* لو النت فصل والطلب اتبعت تاني: المفتاح بيتحجز بعد ما البيانات تعدّي، ولو الطلب فشل المفتاح بيتفكّ */
+async function reserveKey(env, key) {
+  key = str(key, 40);
+  if (key.length < 12) return null;
+  const res = await env.DB.prepare("INSERT OR IGNORE INTO docs (kind,id,data,updated) VALUES ('reqkey',?,'{}',?)").bind(key, Date.now()).run();
+  if (res.meta && res.meta.changes === 1) return null;
+  await new Promise((ok) => setTimeout(ok, 1500));
+  return (await dupReq(env, key)) || { error: "طلبك بيتبعت — استنى ثانية", status: 409 };
+}
+const releaseKey = (env, key) => env.DB.prepare("DELETE FROM docs WHERE kind='reqkey' AND id=?").bind(str(key, 40)).run().catch(() => {});
+async function createOnce(env, b, source) {
+  const held = await reserveKey(env, b.reqKey);
+  if (held) return held;
+  let out;
+  try { out = await createRequest(env, b, source); } catch (e) { await releaseKey(env, b.reqKey); throw e; }
+  if (out.error) await releaseKey(env, b.reqKey);
+  return out;
+}
+async function onceReq(env, key) {
+  key = str(key, 40);
+  if (key.length < 12) return null;
+  return await dupReq(env, key);
+}
+/* حد بسيط لعدد الطلبات في الدقيقة (مفتاح لكل جلسة أو IP) */
+async function rateOk(env, key, max) {
+  const id = key + ":" + Math.floor(Date.now() / 6e4);
+  await env.DB.prepare("INSERT INTO docs (kind,id,data,updated) VALUES ('rl',?,'1',?) ON CONFLICT(kind,id) DO UPDATE SET data=CAST(data AS INTEGER)+1").bind(id, Date.now()).run();
+  const row = await env.DB.prepare("SELECT data FROM docs WHERE kind='rl' AND id=?").bind(id).first();
+  if (Math.random() < 0.02) { try { await env.DB.prepare("DELETE FROM docs WHERE kind IN ('rl','reqkey') AND updated<?").bind(Date.now() - 2 * 864e5).run(); } catch (e) {} }
+  return +(row && row.data) <= max;
+}
+/* تحديث مشروط: بيكتب بس لو حالة الطلب لسه زي ما قريناها — علشان دوستين ورا بعض مايتحسبوش مرتين */
+async function casReq(env, r, next) {
+  const res = await env.DB.prepare("UPDATE docs SET data=?, updated=? WHERE kind='requests' AND id=? AND json_extract(data,'$.status')=? AND IFNULL(json_extract(data,'$.startedAt'),0)=?")
+    .bind(JSON.stringify(next), Date.now(), r.id, r.status, r.startedAt || 0).run();
+  return Boolean(res.meta && res.meta.changes === 1);
+}
+
+/* حذف كل بيانات الراكب: الرحلات (بتفضل من غير اسم ولا رقم علشان الحسابات)، الشات، الرصيد، المشاوير الثابتة،
+   ربط الأهل، الإشعارات، الجلسات، البلاغات. سجل الموافقة على الشروط بيفضل من غير الرقم (إثبات إن الشروط اتوافق عليها) */
+async function wipeRider(env, phone, mineR) {
+  const p10 = l10(phone), st = [];
+  const { links, repeats, reports, consents } = await readDocs(env, ["links", "repeats", "reports", "consents"]);
+  const myReports = (reports || []).filter((x) => l10(x.phone) === p10 || l10(x.riderPhone) === p10);
+  /* الأرشيف الأول، وبعده المسح — وكله جوه batch واحد: يا يتنفّذ كله يا مايتنفّذش خالص */
+  const aid = "rider_" + p10 + "_" + Date.now().toString(36);
+  st.push(putSt(env, "archive", aid, { id: aid, role: "rider", phone: p10, at: Date.now(), exp: Date.now() + ARCH_MS,
+    name: (mineR.find((r) => r.riderName) || {}).riderName || "", rides: mineR.slice(-500).map(ARCH_RIDE), reports: myReports.map(ARCH_REPORT) }));
+  for (const r of mineR) {
+    const open = r.status === "pending" || r.status === "assigned";
+    st.push(putSt(env, "requests", r.id, { ...r, riderName: "(محذوف)", riderPhone: "", note: "", bookerPhone: "", ip: "", token: newToken(), shareToken: "", reqKey: "", from: r.from && { label: r.from.label, zoneId: r.from.zoneId }, to: r.to && { label: r.to.label, zoneId: r.to.zoneId }, ...(open ? { status: "cancelled", cancelledBy: "rider", cancelReason: "deleted", cancelledAt: Date.now() } : {}) }));
+    st.push(delSt(env, "chat", r.id));
+  }
+  /* تنبيهات الأهل: صندوقه هو (لو كان مربوط كـ «أهل»)، وأي تنبيه عنه عند أهله */
+  st.push(delSt(env, "famalerts", p10));
+  for (const k of (links || []).filter((k) => l10(k.rider) === p10)) {
+    const box = await getDoc(env, "famalerts", k.fam);
+    if (box && Array.isArray(box.items)) st.push(putSt(env, "famalerts", k.fam, { ...box, items: box.items.filter((x) => l10(x.riderPhone) !== p10) }));
+  }
+  st.push(delSt(env, "riders", p10), delSt(env, "push", "rider_" + p10));
+  (links || []).filter((k) => l10(k.rider) === p10 || l10(k.fam) === p10).forEach((k) => st.push(delSt(env, "links", k.id)));
+  (repeats || []).filter((x) => l10(x.phone) === p10).forEach((x) => st.push(delSt(env, "repeats", x.id)));
+  st.push(env.DB.prepare("DELETE FROM docs WHERE kind='sessions' AND json_extract(data,'$.phone')=? AND json_extract(data,'$.role')='rider'").bind(p10));
+  myReports.forEach((x) => st.push(putSt(env, "reports", x.id, { ...x, phone: "", riderPhone: "", riderName: "(محذوف)", name: "(محذوف)", note: x.deleteReq ? "طلب حذف — اتنفذ" : "(اتحذف بطلب صاحبه)", status: "closed", closedAt: Date.now() })));
+  (consents || []).filter((c) => l10(c.phone) === p10).forEach((c) => st.push(putSt(env, "consents", c.id, { ...c, phone: "", name: "", deletedAt: Date.now() })));
+  await env.DB.batch(st);
+  return { cleared: mineR.length };
 }
 
 export async function onRequest({ request, env, params }) {
@@ -619,6 +810,9 @@ export async function onRequest({ request, env, params }) {
 
     if (route === "public" && method === "GET") {
       const pub = await readDocs(env, PUBLIC_KINDS);
+      try { await purgeArchive(env); } catch (e) {}
+      /* إعدادات حساب المراجعة مابتطلعش للتطبيق خالص */
+      pub.config = (pub.config || []).filter((c) => c.id !== "review");
       /* الأماكن اللي اتحددت تلقائياً وطلعت بعيد عن البلد (أكتر من ٤ كم) مابتظهرش للراكب لحد ما الإدارة تراجعها */
       if (Array.isArray(pub.places)) {
         const C = { lat: 30.7964, lng: 31.6261 };
@@ -665,6 +859,7 @@ export async function onRequest({ request, env, params }) {
       const b = await parseBody(request);
       const phone = digits(b.phone), role = "rider";
       if (phone.length < 10) return json({ error: "رقم الموبايل مش صحيح" }, 400);
+      if (await isReview(env, phone)) return json({ skip: true, token: await newSession(env, phone, role) });
       if (!verifyOn(env)) return json({ skip: true, token: await newSession(env, phone, role) });
       const now = Date.now(), key = l10(phone);
       const log = (await getDoc(env, "otplog", key)) || { sends: [] };
@@ -733,6 +928,8 @@ export async function onRequest({ request, env, params }) {
       const b = await parseBody(request);
       const deny = await needSession(request, env, b.forOther && b.bookerPhone ? b.bookerPhone : b.riderPhone, "rider");
       if (deny) return deny;
+      const again = await onceReq(env, b.reqKey);
+      if (again) return again.error ? json({ error: again.error }, again.status) : json(again);
       /* ضد الطلبات الوهمية: ٣ طلبات مفتوحة بالكتير لكل رقم، وطلب واحد كل دقيقة من نفس الرقم أو الموبايل */
       const ip = str(request.headers.get("CF-Connecting-IP"), 64);
       const rp = digits(b.riderPhone).slice(0, 15);
@@ -744,18 +941,26 @@ export async function onRequest({ request, env, params }) {
         || (ip && allR.filter((r) => r.ip === ip && Date.now() - (r.createdAt || 0) < 60000).length >= 4))
         return json({ error: "استنى دقيقة قبل ما تطلب تاني" }, 429);
       b.__ip = ip;
-      const out = await createRequest(env, b, "app");
+      const out = await createOnce(env, b, "app");
       return out.error ? json({ error: out.error }, out.status) : json(out);
     }
 
     /* التكاتك القريبة للراكب: أونلاين + فاضية + مكانها وصل من دقيقتين. المكان تقريبي (~١٠٠ م) ومن غير أي اسم أو رقم */
     if (route === "nearby" && method === "GET") {
+      /* للركاب المسجّلين بس (لما التأكيد شغال)، وبحد ٣٠ مرة في الدقيقة — علشان محدش يتتبّع السواقين */
+      const st = str(request.headers.get("x-session"), 80);
+      const s = st ? await getDoc(env, "sessions", st) : null;
+      if (verifyOn(env) && (!s || s.role !== "rider" || Date.now() - s.at > SESSION_TTL)) return json({ count: 0, near: 0, nearestM: null, drivers: [] });
+      if (!(await rateOk(env, "nb-" + (st ? st.slice(0, 16) : str(request.headers.get("CF-Connecting-IP") || "x", 64)), 30))) return json({ error: "استنى شوية" }, 429);
       const lat = +url.searchParams.get("lat"), lng = +url.searchParams.get("lng");
       const { drivers, requests } = await readDocs(env, ["drivers", "requests"]);
       const busy = new Set(requests.filter((r) => r.status === "assigned" && r.driverId).map((r) => r.driverId));
       const now = Date.now(), hour = Math.floor(now / 36e5);
       const hash = (s) => { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) | 0; return h; };
-      const out = drivers.filter((d) => d.active !== false && d.online !== false && d.lastSeen && now - d.lastSeen < ONLINE_MS && d.loc && now - d.loc.at < 2 * 60 * 1000 && !busy.has(d.id))
+      const isoN = await isolateOn(env);
+      /* راكب المراجعة بيشوف سائق المراجعة بس، والراكب الحقيقي مابيشوفهوش */
+      const rvMe = Boolean(isoN && s && s.role === "rider" && (await isReview(env, s.phone)));
+      const out = drivers.filter((d) => (!isoN || (rvMe ? Boolean(d.reviewer) : !d.reviewer)) && d.active !== false && d.online !== false && d.lastSeen && now - d.lastSeen < ONLINE_MS && d.loc && now - d.loc.at < 2 * 60 * 1000 && !busy.has(d.id))
         .map((d) => {
           const h = hash(d.id + ":" + hour), ox = ((h & 0xff) / 255 - 0.5) * 0.0018, oy = (((h >> 8) & 0xff) / 255 - 0.5) * 0.0018;
           return { k: (hash(d.id) >>> 0).toString(36), lat: +(d.loc.lat + oy).toFixed(5), lng: +(d.loc.lng + ox).toFixed(5), h: d.loc.h };
@@ -874,21 +1079,35 @@ export async function onRequest({ request, env, params }) {
       return json({ ok: true, status: "cancelled" });
     }
 
-    /* احذف حسابي: بيمسح اسم الراكب ورقمه من كل رحلاته اللي خلصت (المفتوحة بتتلغي) */
+    /* احذف حسابي: بيمسح كل البيانات المربوطة بالرقم. لازم يثبت إنه صاحب الرقم:
+       تأكيد واتساب لو شغال، أو تذكرة رحلة من رحلاته (محفوظة على موبايله). غير كده الطلب بيروح للإدارة تتأكد بنفسها */
     if (route === "delete-account" && method === "POST") {
       const b = await parseBody(request);
-      const phone = digits(b.phone).slice(0, 15);
+      const phone = digits(b.phone).slice(0, 15), p10 = l10(phone);
       if (phone.length < 9) return json({ error: "اكتب رقمك" }, 400);
-      const deny = await needSession(request, env, phone, "rider");
-      if (deny) return deny;
-      const { requests } = await readDocs(env, ["requests"]);
-      let n = 0;
-      for (const r of requests.filter((x) => x.riderPhone === phone)) {
-        const open = r.status === "pending" || r.status === "assigned";
-        await putDoc(env, "requests", r.id, { ...r, riderName: "(محذوف)", riderPhone: "", note: "", bookerPhone: "", ip: "", ...(open ? { status: "cancelled", cancelledBy: "rider", cancelReason: "deleted" } : {}) });
-        n++;
+      /* السائق من صفحة الحذف: الطلب بيروح للإدارة تتأكد منه وتحذف */
+      if (b.role === "driver") {
+        if (!(await rateOk(env, "del-" + p10, 3))) return json({ error: "استنى شوية وجرّب تاني" }, 429);
+        const rid = uid();
+        await putDoc(env, "reports", rid, { id: rid, kind: "other", status: "open", phone, name: str(b.name, 60), note: "طلب حذف حساب سائق — اتأكد إنه هو اللي طالب (كلّمه على الرقم ده) وبعدين احذف", deleteReq: true, deleteRole: "driver", createdAt: Date.now() });
+        return json({ ok: true, queued: true });
       }
-      return json({ ok: true, cleared: n });
+      const { requests } = await readDocs(env, ["requests"]);
+      const mineR = requests.filter((x) => l10(x.riderPhone) === p10 || l10(x.bookerPhone) === p10);
+      let proven = false;
+      /* الحذف المباشر محتاج تأكيد واتساب لنفس الرقم (أو حساب المراجعة). غير كده الطلب بيروح للإدارة تتأكد بنفسها */
+      if (verifyOn(env) || (await isReview(env, phone))) {
+        const t = str(request.headers.get("x-session"), 80), s = t ? await getDoc(env, "sessions", t) : null;
+        proven = Boolean(s && s.role === "rider" && s.phone === p10 && Date.now() - s.at <= SESSION_TTL);
+        if (!proven && verifyOn(env)) return json({ error: "أكّد رقمك الأول — دوس تاني", reverify: "rider" }, 401);
+      }
+      if (!proven) {
+        if (!(await rateOk(env, "del-" + p10, 3))) return json({ error: "استنى شوية وجرّب تاني" }, 429);
+        const rid = uid();
+        await putDoc(env, "reports", rid, { id: rid, kind: "other", status: "open", phone, riderPhone: phone, riderName: str(b.name, 60), name: str(b.name, 60), note: "طلب حذف الحساب — اتأكد إن صاحب الرقم هو اللي طالب (كلّمه على الرقم ده) وبعدين احذف", deleteReq: true, createdAt: Date.now() });
+        return json({ ok: true, queued: true });
+      }
+      return json({ ok: true, ...(await wipeRider(env, phone, mineR)) });
     }
 
     /* تقييم السائق بعد الرحلة — مرة واحدة لكل رحلة */
@@ -1173,10 +1392,13 @@ export async function onRequest({ request, env, params }) {
         let peer = "";
         if (who === "r" && r.driverId) { const d = await getDoc(env, "drivers", r.driverId); peer = d ? d.name : ""; }
         else peer = (r.riderName || "").trim().split(/\s+/)[0] || "الراكب";
+        /* الرسايل بتتمسح خالص بعد ٢٤ ساعة من قفل المشوار */
+        const old = !open && Date.now() - (r.finishedAt || r.cancelledAt || r.createdAt || 0) > 864e5;
+        if (old && (c.m.length || c.s.length)) { try { await env.DB.prepare("DELETE FROM docs WHERE kind='chat' AND id=?").bind(r.id).run(); } catch (e) {} }
         return json({
           me: who, peer, open: Boolean(open), status: r.status, now: Date.now(),
-          m: c.m.filter((x) => x.at > after),
-          s: c.s.filter((x) => x.at > after && x.f !== who),
+          m: old ? [] : c.m.filter((x) => x.at > after),
+          s: old || !open ? [] : c.s.filter((x) => x.at > after && x.f !== who && Date.now() - x.at < 5 * 60 * 1000),
         });
       }
       if (method === "POST") {
@@ -1203,27 +1425,43 @@ export async function onRequest({ request, env, params }) {
       if (sub === "login" && method === "POST") {
         const b = await parseBody(request);
         const phone = digits(b.phone), code = digits(b.code);
+        if (phone.length < 9) return json({ error: "اكتب رقم الموبايل صح" }, 400);
+        if (await drvLock(env, phone)) return json({ error: LOCK_MSG, code: "locked" }, 429);
         const { drivers } = await readDocs(env, ["drivers"]);
         const d = drivers.find((x) => digits(x.phone) === phone);
-        if (!d || !d.code || !safeEqual(code, String(d.code)))
-          return json({ error: "الرقم أو الكود غير صحيح" }, 401);
+        if (d) await stampCode(env, d);
+        if (!d || !d.code || !safeEqual(code, String(d.code))) {
+          const l = await drvFail(env, phone);
+          return l.until ? json({ error: LOCK_MSG, code: "locked" }, 429) : json({ error: "الرقم أو الكود غير صحيح — فاضل " + (DRV_TRIES - l.n) + " محاولات" }, 401);
+        }
+        if (!d.reviewer && !codeLive(d)) return json({ error: "الكود ده خلصت صلاحيته — اطلب كود جديد من الإدارة", code: "code_expired" }, 401);
         if (d.active === false) return json({ error: "حسابك موقوف — كلّم الإدارة" }, 403);
         if (d.hold) return json({ error: HOLD_MSG, code: "hold" }, 403);
         /* ربط الحساب بموبايل واحد: أول دخول بيربطه، وأي موبايل تاني لازم الإدارة توافق عليه */
         const dev = devOf(b.device);
         if (dev.length < 8) return json({ error: "حدّث التطبيق وجرّب تاني" }, 400);
-        if (!d.deviceId) { d.deviceId = dev; d.deviceAt = Date.now(); delete d.pendingDevice; await putDoc(env, "drivers", d.id, d); }
+        /* كود جديد من الإدارة (ليه صلاحية) = موافقة على الموبايل اللي هيدخل بيه */
+        if (d.reviewer || !d.deviceId || (d.codeExp && d.deviceId !== dev)) { d.deviceId = dev; d.deviceAt = Date.now(); delete d.pendingDevice; }
         else if (d.deviceId !== dev) {
           d.pendingDevice = { id: dev, at: Date.now(), ua: str(request.headers.get("user-agent"), 160) };
           await putDoc(env, "drivers", d.id, d);
           return json({ error: "الموبايل ده جديد على حسابك. طلبك وصل للإدارة — أول ما توافق، ادخل تاني", code: "device_pending" }, 403);
         }
-        if (!subActive(d, await subCfg(env))) return json({ error: "رصيدك خلص — اشحن من الإدارة علشان تستقبل مشاوير" }, 403);
-        return json({ ok: true, driver: { id: d.id, name: d.name, plate: d.plate } });
+        const stok = tok() + tok();
+        d.sess = await sha(stok); d.sessAt = Date.now(); d.codeUsed = !d.reviewer;
+        await putDoc(env, "drivers", d.id, d);
+        try { await env.DB.prepare("DELETE FROM docs WHERE kind='loginfail' AND id=?").bind("drv-" + phone).run(); } catch (e) {}
+        if (!subActive(d, await subCfg(env))) return json({ error: "رصيدك خلص — اشحن من الإدارة علشان تستقبل مشاوير", token: stok, driver: { id: d.id, name: d.name, plate: d.plate } }, 403);
+        return json({ ok: true, token: stok, driver: { id: d.id, name: d.name, plate: d.plate } });
       }
 
       const gx = await getDriverEx(request, env), me = gx.d;
       if (!me) return json({ error: gx.why || "غير مصرّح" }, gx.why ? 403 : 401);
+      /* السائق بيحذف حسابه بنفسه من «حسابي» */
+      if (sub === "delete-account" && method === "POST") {
+        const o = await wipeDriver(env, me);
+        return o.error ? json({ error: o.error }, o.status) : json(o);
+      }
       const sc = await subCfg(env);
       const ss = subState(me, sc);
       if (!me.joinedAt && !me.createdAt) { me.joinedAt = Date.now(); await putDoc(env, "drivers", me.id, me); }
@@ -1338,9 +1576,11 @@ export async function onRequest({ request, env, params }) {
         }
         const forMe = (r) => r.prefDriver === me.id;
         const prefHold = (r) => r.prefDriver && !forMe(r) && now - openAt(r) < PREF_MS && prefFree[r.prefDriver];
+        const iso = await isolateOn(env);
         const open = (me.online === false || mine || blocked) ? [] : requests
           .filter((r) => r.status === "pending" && now >= openAt(r) && now - winAt(r) < CLAIM_WINDOW_MS)
           .filter((r) => !(r.skipDrivers || []).includes(me.id))
+          .filter((r) => !iso || (me.reviewer ? Boolean(r.review) : !r.review))
           .filter((r) => !(r.offers || []).some((o) => o.d === me.id && !offerLive(o, now) && now - o.at < OFFER_TTL_MS + REOFFER_MS))
           .filter((r) => !prefHold(r))
           .filter((r) => forMe(r) || inReach(r, me, now - openAt(r)))
@@ -1425,6 +1665,7 @@ export async function onRequest({ request, env, params }) {
         const r = await getDoc(env, "requests", rid);
         if (!r) return json({ error: "الطلب غير موجود" }, 404);
         if (r.status === "cancelled") return json({ error: "الراكب لغى الطلب" }, 409);
+        if (Boolean(me.reviewer) !== Boolean(r.review) && (await isolateOn(env))) return json({ error: "الطلب غير موجود" }, 404);
         if (r.status !== "pending") return json({ error: "سائق تاني خد المشوار" }, 409);
         if (Date.now() < openAt(r)) return json({ error: "الطلب ده محجوز لبعدين" }, 409);
         if ((r.skipDrivers || []).includes(me.id)) return json({ error: "سبت المشوار ده قبل كده — استنى الطلب الجاي" }, 409);
@@ -1497,9 +1738,22 @@ export async function onRequest({ request, env, params }) {
         const r = await getDoc(env, "requests", str(b.requestId, 40));
         if (!r) return json({ error: "الطلب غير موجود" }, 404);
         if (r.driverId !== me.id || r.status !== "assigned") return json({ error: "المشوار ده مش بتاعك" }, 403);
-        if (r.codeOn && !safeEqual(digits(b.code), String(r.code || ""))) return json({ error: "الكود غلط — اسأل الراكب تاني" }, 400);
+        if (r.codeOn) {
+          /* ٥ محاولات غلط في كود الركوب ← يتقفل ربع ساعة */
+          if ((r.codeFails || 0) >= 5 && Date.now() - (r.codeFailAt || 0) < 15 * 6e4) return json({ error: "الكود اتكتب غلط ٥ مرات — استنى ربع ساعة أو كلّم الإدارة" }, 429);
+          if (!safeEqual(digits(b.code), String(r.code || ""))) {
+            const now3 = Date.now();
+            const row = await env.DB.prepare(`UPDATE docs SET data=json_set(data,
+                '$.codeFails', CASE WHEN ?-IFNULL(json_extract(data,'$.codeFailAt'),0) < 900000 THEN IFNULL(json_extract(data,'$.codeFails'),0)+1 ELSE 1 END,
+                '$.codeFailAt', ?) WHERE kind='requests' AND id=? AND json_extract(data,'$.status')='assigned' RETURNING json_extract(data,'$.codeFails') AS n`).bind(now3, now3, r.id).first();
+            const n = +(row && row.n) || 1;
+            return json({ error: "الكود غلط — اسأل الراكب تاني (فاضل " + Math.max(0, 5 - n) + ")" }, 400);
+          }
+        }
+        if (r.startedAt) return json({ ok: true });
         const st = Date.now();
-        await putDoc(env, "requests", r.id, { ...r, startedAt: st, ...(r.multi ? { meter: { km: 0, last: me.loc ? { lat: me.loc.lat, lng: me.loc.lng, at: st } : null }, waits: [], waitOn: null } : {}) });
+        if (!(await casReq(env, r, { ...r, startedAt: st, ...(r.multi ? { meter: { km: 0, last: me.loc ? { lat: me.loc.lat, lng: me.loc.lng, at: st } : null }, waits: [], waitOn: null } : {}) })))
+          return json({ error: "المشوار اتغيّر — حدّث الصفحة" }, 409);
         if (r.multi) { me.meterId = r.id; await putDoc(env, "drivers", me.id, me); }
         const dd = me;
         try { await pushFam(env, r.bookerPhone || r.riderPhone, { type: "start", requestId: r.id, share: r.shareToken || "", driver: dd.name + (dd.plate ? " · لوحة " + dd.plate : ""), to: r.to && r.to.label }, true); } catch (e) {}
@@ -1528,6 +1782,8 @@ export async function onRequest({ request, env, params }) {
           const mv = meterView(next, PR(await pricingCfg(env)), nw); delete mv.waitOn; delete mv.weak;
           next.bill = mv; next.fare = mv.final;
         }
+        /* نحجز القفلة الأول: لو دوستين وصلوا سوا، واحدة بس بتعدّي والتانية بترجع من غير ما تخصم حاجة */
+        if (!(await casReq(env, r, next))) return json({ error: "المشوار اتقفل قبل كده" }, 409);
         if (next.status === "done" || b.status === "released") me.meterId = null;
         /* عدّادات المستوى: كام مشوار خلص وكام مرة ساب المشوار */
         try {
@@ -1599,10 +1855,142 @@ export async function onRequest({ request, env, params }) {
         return json({ error: "اسم المستخدم أو الباسورد غلط" }, 401);
       }
       if (lf.n) await putDoc(env, "loginfail", ipK, { id: ipK, n: 0, at: 0 });
+      const at = tok() + tok(), ah = await sha(at);
+      await putDoc(env, "adminsess", ah, { id: ah, at: Date.now(), exp: Date.now() + ADMIN_TTL, ua: str(request.headers.get("user-agent"), 160) });
+      return json({ ok: true, token: at });
+    }
+
+    if (!(await adminOk(request, env))) return json({ error: "غير مصرّح" }, 401);
+
+    if (route === "logout" && method === "POST") {
+      try { await env.DB.prepare("DELETE FROM docs WHERE kind='adminsess' AND id=?").bind(await sha(request.headers.get("x-admin-token"))).run(); } catch (e) {}
       return json({ ok: true });
     }
 
-    if (!isAdmin(request, env)) return json({ error: "غير مصرّح" }, 401);
+    /* أوامر الإدارة على المشاوير — بنفس قواعد التطبيق (مفيش سائق في مشوارين، ومفيش كتابة فوق طلب اتغيّر) */
+    if (route === "admin-assign" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.requestId, 40)), d = await getDoc(env, "drivers", str(b.driverId, 40));
+      if (!r || !d) return json({ error: "الطلب أو السائق مش موجود" }, 404);
+      if (r.status !== "pending") return json({ error: "الطلب ده اتاخد أو اتقفل — حدّث الصفحة" }, 409);
+      if (d.active === false || d.hold) return json({ error: "السائق ده موقوف" }, 409);
+      const next = await assignTo(env, { ...r, assignedBy: "admin" }, d);
+      if (!next) return json({ error: "السائق ده في مشوار دلوقتي، أو الطلب اتاخد" }, 409);
+      return json({ ok: true });
+    }
+    if (route === "admin-wipe" && method === "POST") {
+      const b = await parseBody(request);
+      const phone = digits(b.phone).slice(0, 15), p10 = l10(phone);
+      if (p10.length < 9) return json({ error: "رقم غير صحيح" }, 400);
+      if (b.role === "driver") {
+        const { drivers } = await readDocs(env, ["drivers"]);
+        const d = drivers.find((x) => l10(x.phone) === p10);
+        if (!d) return json({ error: "مفيش سائق بالرقم ده" }, 404);
+        const o = await wipeDriver(env, d);
+        return o.error ? json({ error: o.error }, o.status) : json({ ok: true, cleared: o.rides });
+      }
+      const { requests } = await readDocs(env, ["requests"]);
+      const out = await wipeRider(env, phone, requests.filter((x) => l10(x.riderPhone) === p10 || l10(x.bookerPhone) === p10));
+      return json({ ok: true, ...out });
+    }
+    /* أرشيف المحذوفين (سنة) */
+    if (route === "archive" && method === "GET") {
+      archPurgedAt = 0; await purgeArchive(env);
+      if (sub) { const a = await getDoc(env, "archive", str(sub, 80)); return a ? json(a) : json({ error: "مش موجود" }, 404); }
+      const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind='archive' ORDER BY updated DESC LIMIT 500").all();
+      return json({ items: (results || []).map((x) => { const a = JSON.parse(x.data); return { id: a.id, role: a.role, phone: a.phone, name: a.name, at: a.at, exp: a.exp, rides: (a.rides || []).length }; }) });
+    }
+    /* حساب مراجعة جوجل: راكب + سائق تجريبيين، كود السائق ثابت ومابيخلصش، ومابيشوفوش غير بعض */
+    if (route === "admin-review" && method === "POST") {
+      const b = await parseBody(request);
+      /* bypass = راكب المراجعة يدخل من غير واتساب (لجوجل) · isolate = طلبات المراجعة معزولة عن السواقين الحقيقيين */
+      const bypass = b.bypass !== false, isolate = b.isolate !== false;
+      const rp = bypass ? digits(b.riderPhone) : "", dp = digits(b.driverPhone);
+      if ((bypass && rp.length !== 11) || dp.length !== 11 || (bypass && rp === dp)) return json({ error: bypass ? "اكتب رقمين مختلفين (١١ رقم)" : "اكتب رقم السائق (١١ رقم)" }, 400);
+      const { drivers } = await readDocs(env, ["drivers"]);
+      const clash = drivers.find((d) => l10(d.phone) === l10(dp) && !d.reviewer);
+      if (clash) return json({ error: "رقم السائق ده متسجّل لسائق حقيقي" }, 409);
+      /* رقم الراكب التجريبي (اللي بيدخل من غير واتساب) لازم يبقى جديد خالص — مالوش أي رحلات أو حساب حقيقي */
+      const cfgOld = await getDoc(env, "config", "review");
+      if (bypass && (!cfgOld || l10(cfgOld.riderPhone) !== l10(rp))) {
+        const used = await env.DB.prepare("SELECT 1 FROM docs WHERE (kind='riders' AND id=?) OR (kind='requests' AND (substr(json_extract(data,'$.riderPhone'),-10)=? OR substr(json_extract(data,'$.bookerPhone'),-10)=?)) OR (kind='sessions' AND json_extract(data,'$.phone')=?) LIMIT 1").bind(l10(rp), l10(rp), l10(rp), l10(rp)).first();
+        if (used || drivers.some((d) => l10(d.phone) === l10(rp))) return json({ error: "رقم الراكب ده اتاستخدم قبل كده — استخدم رقم جديد خالص" }, 409);
+      }
+      const st = [];
+      /* أي تغيير (إيقاف، أو رقم راكب جديد، أو قفل «من غير واتساب»): جلسات رقم المراجعة القديم كلها بتتلغي،
+         علشان مايفضلش داخل ويتحسب راكب عادي */
+      if (cfgOld && cfgOld.riderPhone && (b.on === false || !bypass || l10(cfgOld.riderPhone) !== l10(rp)))
+        st.push(env.DB.prepare("DELETE FROM docs WHERE kind='sessions' AND json_extract(data,'$.phone')=?").bind(l10(cfgOld.riderPhone)));
+      const old = drivers.find((d) => d.reviewer) || {};
+      const code = old.code || String(1000 + (crypto.getRandomValues(new Uint16Array(1))[0] % 9000));
+      const kick = b.on === false || (old.phone && l10(old.phone) !== l10(dp));
+      const d = { ...old, id: old.id || "review-driver", name: str(b.driverName, 60) || old.name || "سائق التجربة", phone: dp, plate: str(b.plate, 20) || old.plate || "TEST", code, reviewer: true, active: b.on !== false, online: false, ...(kick ? { sess: null } : {}), createdAt: old.createdAt || Date.now(), joinedAt: old.joinedAt || Date.now() };
+      const isoOffAt = isolate ? 0 : (cfgOld && cfgOld.isolate === false && cfgOld.isoOffAt ? cfgOld.isoOffAt : Date.now());
+      st.push(putSt(env, "drivers", d.id, d));
+      st.push(putSt(env, "config", "review", { id: "review", on: b.on !== false, bypass, isolate, isoOffAt, riderPhone: bypass ? rp : "", driverPhone: dp, at: Date.now() }));
+      /* السائق والإعدادات بيتحفظوا مع بعض — يا الاتنين يا ولا حاجة */
+      await env.DB.batch(st);
+      return json({ ok: true, riderPhone: bypass ? rp : "", driverPhone: dp, code, on: b.on !== false, bypass, isolate, isoUntil: isoOffAt ? isoOffAt + ISO_OFF_MS : 0 });
+    }
+    /* إنهاء فترة التجربة: الحسابات (ركاب وسواقين) بتفضل زي ما هي ويطلبوا ويستقبلوا عادي،
+       والسجل بيتمسح: المشاوير والشات والبلاغات والتقييمات والمشاوير المحفوظة. والعزل بيرجع يشتغل */
+    if (route === "admin-trial-end" && method === "POST") {
+      const b = await parseBody(request);
+      if (b.confirm !== "امسح") return json({ error: "اكتب «امسح» للتأكيد" }, 400);
+      const busy = await env.DB.prepare("SELECT 1 FROM docs WHERE kind='requests' AND json_extract(data,'$.status')='assigned' LIMIT 1").first();
+      if (busy) return json({ error: "في مشوار شغال دلوقتي — استنى لما يخلص" }, 409);
+      const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM docs WHERE kind='requests'").first();
+      const cfgR = await getDoc(env, "config", "review");
+      const now = Date.now();
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM docs WHERE kind IN ('requests','chat','reports','famalerts','repeats','rated','reqkey','rl')"),
+        env.DB.prepare("UPDATE docs SET data=json_remove(json_set(data,'$.ratingSum',0,'$.ratingCount',0,'$.rideCount',0,'$.releaseCount',0,'$.tagRated',0),'$.lastConfirmedReport','$.tagCount','$.redBy','$.redAlert','$.reviews'), updated=? WHERE kind='drivers'").bind(now),
+        ...(cfgR ? [putSt(env, "config", "review", { ...cfgR, isolate: true, isoOffAt: 0, at: now })] : []),
+        putSt(env, "config", "trialEnd", { id: "trialEnd", at: now, rides: (cnt && cnt.n) || 0 }),
+      ]);
+      return json({ ok: true, rides: (cnt && cnt.n) || 0 });
+    }
+    if (route === "admin-cancel" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.requestId, 40));
+      if (!r) return json({ error: "الطلب مش موجود" }, 404);
+      if (r.status === "done" || r.status === "cancelled") return json({ error: "المشوار اتقفل قبل كده" }, 409);
+      const next = { ...r, status: "cancelled", cancelReason: "admin", cancelNote: str(b.reason, 140), cancelledBy: "admin", cancelledAt: Date.now() };
+      if (!(await casReq(env, r, next))) return json({ error: "المشوار اتغيّر — حدّث الصفحة وجرّب تاني" }, 409);
+      if (r.driverId) { try { const d = await getDoc(env, "drivers", r.driverId); if (d) { if (d.meterId === r.id) { d.meterId = null; await putDoc(env, "drivers", d.id, d); } await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: "المشوار اتلغى من الإدارة", body: (r.from && r.from.label) || "", url: "/driver.html", tag: "ride-" + r.id }); } } catch (e) {} }
+      try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: "المشوار اتلغى", body: "الإدارة لغت المشوار — لو محتاج حاجة كلّمنا", url: "/", tag: "ride-" + r.id }); } catch (e) {}
+      return json({ ok: true });
+    }
+    /* استرجاع نسخة احتياطية: بيرجّع الناقص بس. أي سجل موجود دلوقتي بيفضل زي ما هو (التذاكر، المشاوير الشغالة، الأرصدة).
+       dry = بيقول هيرجّع كام من غير ما يكتب حاجة */
+    if (route === "restore" && method === "POST") {
+      const raw = await request.text();
+      if (raw.length > 8e6) return json({ error: "الملف كبير" }, 413);
+      let b; try { b = JSON.parse(raw); } catch (e) { return json({ error: "الملف مش نسخة صحيحة" }, 400); }
+      if (!b || b.app !== "el-mahatta") return json({ error: "الملف ده مش نسخة من المحطة" }, 400);
+      const dry = Boolean(b.dry), have = {}, plan = {};
+      for (const k of KINDS) {
+        const { results } = await env.DB.prepare("SELECT id FROM docs WHERE kind=?").bind(k).all();
+        have[k] = new Set((results || []).map((x) => x.id));
+        const arr = (Array.isArray(b[k]) ? b[k] : (k === "config" && b.configDocs) || []).filter((x) => x && typeof x === "object" && !Array.isArray(x) && typeof x.id === "string" && x.id && x.id.length <= 80);
+        const seen = new Set();
+        plan[k] = { add: arr.filter((x) => !have[k].has(x.id) && !seen.has(x.id) && seen.add(x.id)), keep: arr.filter((x) => have[k].has(x.id)).length };
+      }
+      const summary = {}; let add = 0, keep = 0;
+      for (const k of KINDS) { summary[k] = { add: plan[k].add.length, keep: plan[k].keep }; add += plan[k].add.length; keep += plan[k].keep; }
+      if (dry) return json({ ok: true, dry: true, add, keep, summary, at: str(b.at, 40) });
+      const stmts = [];
+      for (const k of KINDS) for (const x of plan[k].add) {
+        const y = { ...x };
+        if (k === "requests") { if (!y.token) y.token = newToken(); delete y.reqKey; if (y.status === "pending" || y.status === "assigned") { y.status = "cancelled"; y.cancelReason = "restored"; y.cancelledAt = Date.now(); } }
+        if (k === "drivers") { delete y.sess; y.codeUsed = true; delete y.isOnline; }
+        stmts.push(env.DB.prepare("INSERT OR IGNORE INTO docs (kind,id,data,updated) VALUES (?,?,?,?)").bind(k, y.id, JSON.stringify(y), Date.now()));
+      }
+      for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+      const lid = uid();
+      await putDoc(env, "restorelog", lid, { id: lid, at: Date.now(), from: str(b.at, 40), add, keep, summary });
+      return json({ ok: true, count: add, keep });
+    }
 
     /* مساعد الإدارة (AI): بيقرا إحصائيات من غير أسامي أو أرقام ركاب، وبيقترح تغييرات في إعدادات البورتال بس.
        التنفيذ بيحصل من البورتال بعد ما الإدارة تدوس «موافق» — المساعد نفسه مابيغيّرش حاجة */
@@ -1682,7 +2070,10 @@ ${JSON.stringify(stats)}`;
     }
 
     if (route === "phone-request" && method === "POST") {
-      const out = await createRequest(env, await parseBody(request), "phone");
+      const pb = await parseBody(request);
+      const again = await onceReq(env, pb.reqKey);
+      if (again) return again.error ? json({ error: again.error }, again.status) : json(again);
+      const out = await createOnce(env, pb, "phone");
       return out.error ? json({ error: out.error }, out.status) : json(out);
     }
 
@@ -1695,10 +2086,13 @@ ${JSON.stringify(stats)}`;
     if (route === "state" && method === "GET") {
       const all = await readDocs(env, KINDS);
       const now = Date.now();
+      await purgeArchive(env);
       try { await expireStale(env, all.requests || []); } catch (e) {}
-      all.drivers = all.drivers.map((d) => ({
+      /* مابنبعتش للبورتال تذاكر الدخول ولا توكن الراكب */
+      all.drivers = all.drivers.map(({ sess, ...d }) => ({
         ...d, isOnline: d.online !== false && now - (d.lastSeen || 0) < ONLINE_MS,
       }));
+      all.requests = (all.requests || []).map(({ token, reqKey, ...r }) => r);
       return json(all);
     }
 
@@ -1709,6 +2103,13 @@ ${JSON.stringify(stats)}`;
         const b = await parseBody(request);
         if (!b || typeof b !== "object" || Array.isArray(b)) return json({ error: "بيانات غير صحيحة" }, 400);
         b.id = id;
+        /* المشاوير: الإدارة تقدر تكتب ملاحظة بس — الأجرة والحالة والسائق والعدّاد مابيتغيّروش غير بأوامر السيرفر */
+        if (kind === "requests") {
+          const old = await getDoc(env, "requests", id);
+          if (!old) return json({ error: "الطلب مش موجود" }, 404);
+          await env.DB.prepare("UPDATE docs SET data=json_set(data,'$.adminNote',?,'$.adminNoteAt',?), updated=? WHERE kind='requests' AND id=?").bind(str(b.adminNote, 300), Date.now(), Date.now(), id).run();
+          return json({ ok: true });
+        }
         if (kind === "drivers") {
           /* رقم موبايل واحد ورقم قومي واحد لكل سائق */
           const { drivers: others } = await readDocs(env, ["drivers"]);
@@ -1729,6 +2130,8 @@ ${JSON.stringify(stats)}`;
         return json({ ok: true });
       }
       if (method === "DELETE") {
+        if (kind === "requests") return json({ error: "المشاوير مابتتمسحش — الغيها بس" }, 409);
+        if (kind === "drivers") return json({ error: "حذف السائق بيتعمل من زرار «حذف» في كارته (بيروح للأرشيف)" }, 409);
         await env.DB.prepare("DELETE FROM docs WHERE kind=? AND id=?").bind(kind, id).run();
         return json({ ok: true });
       }
