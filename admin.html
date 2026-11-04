@@ -424,7 +424,16 @@
     if(sv && typeof sv === "object" && sv.t){ pin = sv.t; } else { localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }
   }catch(e){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} }
 
-  function api(path, opts){ opts = opts || {}; opts.adminToken = pin; return TT.api(path, opts); }
+  function api(path, opts){ opts = opts || {}; opts.adminToken = pin;
+    /* لو آخر تحديث فشل: مفيش أوامر على بيانات قديمة لحد ما البيانات تتحدّث */
+    if(load.stale && opts.method && opts.method !== "GET"){ load(); return Promise.reject(new Error("البيانات مش محدّثة — استنى لحد ما النت يرجع وجرّب تاني")); }
+    return TT.api(path, opts); }
+  /* الملفات اللي بتتنزّل (النسخة الاحتياطية والأرشيف) بتطلب الباسورد تاني — وبيتفتكر ٥ دقايق بس */
+  var stepPin = "", stepAt = 0;
+  function stepUp(path){
+    if(!stepPin || Date.now() - stepAt > 5 * 6e4){ var p = prompt("اكتب الباسورد تاني علشان تنزّل الملف"); if(!p) return Promise.reject(new Error("اتلغى")); stepPin = p; }
+    return api(path, { pin: stepPin }).then(function(x){ stepAt = Date.now(); return x; }, function(e){ stepPin = ""; throw e; });
+  }
   var save = function(kind, id, body){ return api("doc/"+kind+"/"+id, { method:"PUT", body:body }).then(load, function(e){ TT.toast(e.message || "ماتحفظش — جرّب تاني"); load(); throw e; }); };
   var del  = function(kind, id){ return api("doc/"+kind+"/"+id, { method:"DELETE" }).then(load); };
   var clone = function(o){ return JSON.parse(JSON.stringify(o)); };
@@ -1106,9 +1115,16 @@
       var s = TT.shape(raw);
       S.zones = s.zones; S.places = s.places; S.drivers = raw.drivers || []; S.requests = s.requests; S.cfg = s.cfg; S.cfgRaw = (raw.config || []).filter(function(c){ return c.id === "pricing"; })[0] || {}; S.reports = raw.reports || []; S.riders = raw.riders || []; S.joins = (raw.joins || []).sort(function(a,b){ return (b.createdAt||0) - (a.createdAt||0); });
       renderAll(); renderJoins();
+      if(load.stale){ load.stale = false; var sb = document.getElementById("staleBar"); if(sb) sb.hidden = true; }
     }).catch(function(e){
-      if(e.status === 401){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} location.reload(); }
-      else if(Date.now() - (load.errAt || 0) > 60000){ load.errAt = Date.now(); TT.toast("مش قادر يحدّث البيانات — اتأكد من النت"); }
+      if(e.status === 401){ try{ localStorage.removeItem(KEY); sessionStorage.removeItem(KEY); }catch(x){} location.reload(); return; }
+      load.stale = true;
+      var bar = document.getElementById("staleBar");
+      if(!bar){ bar = document.createElement("div"); bar.id = "staleBar"; bar.className = "banner b-warn"; bar.setAttribute("role", "status");
+        bar.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:90;margin:0;border-radius:0;text-align:center";
+        bar.textContent = "⚠ النت فاصل — اللي قدامك ممكن يكون قديم، والأوامر واقفة لحد ما يتحدّث"; document.body.appendChild(bar); }
+      bar.hidden = false;
+      if(Date.now() - (load.errAt || 0) > 60000){ load.errAt = Date.now(); TT.toast("مش قادر يحدّث البيانات — اتأكد من النت"); }
     });
   }
 
@@ -1182,7 +1198,7 @@
   function freeOf(u){ if(!S.cfg.creditOn) return true; return Date.now() < freeStart(u) + 90 * 864e5; }
   function freeStart(u){ return Math.max(+(u.joinedAt || u.createdAt || 0) || Date.now(), +S.cfg.creditOnAt || 0); }
   $("backupBtn").addEventListener("click", function(){ var btn = this; btn.disabled = true;
-   api("state").then(function(raw){
+   stepUp("state?backup=1").then(function(raw){
     var data = { app:"el-mahatta", v:2, at:new Date().toISOString() }; Object.keys(raw || {}).forEach(function(k){ if(Array.isArray(raw[k])) data[k] = raw[k]; });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type:"application/json" }));
@@ -1204,7 +1220,7 @@
   });
   $("archList").addEventListener("click", function(e){
     var id = e.target.getAttribute && e.target.getAttribute("data-arch"); if(!id) return;
-    api("archive/" + encodeURIComponent(id)).then(function(x){
+    stepUp("archive/" + encodeURIComponent(id)).then(function(x){
       var l = document.createElement("a"); l.href = URL.createObjectURL(new Blob([JSON.stringify(x, null, 1)], { type:"application/json" }));
       l.download = "archive-" + x.role + "-0" + x.phone + ".json"; document.body.appendChild(l); l.click(); setTimeout(function(){ URL.revokeObjectURL(l.href); l.remove(); }, 500);
     }).catch(function(err){ TT.toast(err.message); });
