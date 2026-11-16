@@ -63,15 +63,12 @@
 
     /* السعر يُعرض هنا للمستخدم؛ الخادم يعيد حسابه عند التأكيد ولا يثق بالعميل */
     fareFor: function (state, fromId, toId) {
+      /* التسعير الموحّد: الكيلو × سعر الكيلو، مقرّب لأعلى ٥ ج، ومايقلش عن أقل أجرة — نفس حسبة الخادم */
       var a = T.byId(state.places, fromId), b = T.byId(state.places, toId);
-      var cfg = state.cfg || { same: 10, cross: 15 };
-      if (!a || !b) return { amount: cfg.cross, same: false, known: false };
-      if (a.lat != null && b.lat != null && isFinite(+a.lat) && isFinite(+b.lat)) {
-        var sh = T.dist({ lat: +a.lat, lng: +a.lng }, { lat: +b.lat, lng: +b.lng }) * 1.3 <= (+cfg.cutKm > 0 ? +cfg.cutKm : 2);
-        return { amount: sh ? cfg.same : cfg.cross, same: sh, known: true };
-      }
-      var same = Boolean(a.zoneId && b.zoneId && a.zoneId === b.zoneId);
-      return { amount: same ? cfg.same : cfg.cross, same: same, known: Boolean(a.zoneId && b.zoneId) };
+      var cfg = state.cfg || {}, per = +cfg.perKm > 0 ? +cfg.perKm : 8, min = cfg.minFare != null && isFinite(+cfg.minFare) ? +cfg.minFare : 10;
+      if (!a || !b || a.lat == null || b.lat == null || !isFinite(+a.lat) || !isFinite(+b.lat)) return { amount: min, same: true, known: false };
+      var km = Math.round(T.dist({ lat: +a.lat, lng: +a.lng }, { lat: +b.lat, lng: +b.lng }) * 1.3 * 10) / 10;
+      return { amount: Math.max(min, Math.ceil((km * per - 1e-9) / 5) * 5), km: km, same: true, known: true };
     },
 
     mapsUrl: function (from, to) {
