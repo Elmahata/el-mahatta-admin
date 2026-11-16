@@ -211,6 +211,25 @@
         <div class="field"><label for="pWaitMin">سعر دقيقة الانتظار (ج)</label><input id="pWaitMin" type="number" min="0" step="0.5" inputmode="decimal"></div>
         <div class="field"><label for="pMaxWait">أقصى وقفة (دقيقة)</label><input id="pMaxWait" type="number" min="1" step="1" inputmode="decimal"></div>
       </div>
+      <h3 style="margin:16px 0 6px;font-size:15px">التسعيرة الخاصة (السائق أبعد من الراكب)</h3>
+      <p class="hint" style="margin:0 0 8px">الطلب بيروح للقريبين الأول بالسعر العادي. لو مفيش غير سائق بعيد، الراكب بيتسأل ويوافق. الزيادة كلها للسائق، والبُعد بيتقرّب لأقرب كيلو.</p>
+      <div class="grid2" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <div class="field"><label for="pFarFrom">تبدأ لو أبعد من (كم)</label><input id="pFarFrom" type="number" min="0" step="0.5" inputmode="decimal"></div>
+        <div class="field"><label for="pFarBase">زيادة ثابتة (ج)</label><input id="pFarBase" type="number" min="0" step="1" inputmode="decimal"></div>
+        <div class="field"><label for="pFarPerKm">لكل كيلو بعدها (ج)</label><input id="pFarPerKm" type="number" min="0" step="1" inputmode="decimal"></div>
+        <div class="field"><label for="pFarMax">أقصى بُعد (كم)</label><input id="pFarMax" type="number" min="1" step="0.5" inputmode="decimal"></div>
+      </div>
+      <h3 style="margin:16px 0 6px;font-size:15px">الطلب التالي أثناء المشوار</h3>
+      <div class="grid2" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <div class="field"><label for="pNextR">نطاق الطلب من نقطة الوصول (م)</label><input id="pNextR" type="number" min="50" step="50" inputmode="decimal"></div>
+        <div class="field"><label for="pNextStart">يبدأ لما يفضل للوصول (كم)</label><input id="pNextStart" type="number" min="0.2" step="0.1" inputmode="decimal"></div>
+      </div>
+      <h3 style="margin:16px 0 6px;font-size:15px">تعويض الإلغاء (للسائق)</h3>
+      <p class="hint" style="margin:0 0 8px">بتتحسب لو الراكب لغى بعد أول دقيقة من اختيار السائق، وعدّى عدد المرات المسموح في الأسبوع. بتتضاف على مشواره الجاي وتروح لسائق المشوار ده.</p>
+      <div class="grid2" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <div class="field"><label for="pCxlFee">قيمة التعويض (ج)</label><input id="pCxlFee" type="number" min="0" step="1" inputmode="decimal"></div>
+        <div class="field"><label for="pCxlFree">إلغاءات مسموحة في الأسبوع</label><input id="pCxlFree" type="number" min="0" step="1" inputmode="decimal"></div>
+      </div>
     </div>
     <div class="card">
       <h2>جرّب السعر</h2>
@@ -493,8 +512,8 @@
     d.innerHTML = html; $("aiLog").appendChild(d); return d;
   }
   function aiProposal(p){
-    var rows = [], names = { same:"مشوار قصير", cross:"مشوار طويل", cutKm:"الحد بين القصير والطويل (كم)", outPerKm:"الكيلو برا المدينة", outKm:"برا المدينة لو أبعد من (كم)" };
-    if(p.pricing) Object.keys(p.pricing).forEach(function(k){ rows.push(names[k] + ": " + (S.cfg[k] ?? "—") + " ← <b>" + p.pricing[k] + "</b>"); });
+    var rows = [], names = { perKm:"سعر الكيلو (ج)", minFare:"أقل أجرة (ج)", freeMin:"دقايق الانتظار المجانية", waitPerMin:"دقيقة الانتظار (ج)", maxWaitMin:"أقصى انتظار (دقيقة)" };
+    if(p.pricing) Object.keys(p.pricing).forEach(function(k){ if(!names[k]) return; rows.push(names[k] + ": " + (S.cfg[k] ?? "—") + " ← <b>" + p.pricing[k] + "</b>"); });
     (p.zones || []).forEach(function(z){ var o = TT.byId(S.zones, z.id) || {}; if(z.same != null) rows.push("منطقة " + TT.esc(z.name) + " قصير: " + (o.same ?? "—") + " ← <b>" + z.same + "</b>"); if(z.cross != null) rows.push("منطقة " + TT.esc(z.name) + " طويل: " + (o.cross ?? "—") + " ← <b>" + z.cross + "</b>"); });
     var box = aiBubble("assistant", '<b>اقتراح تغيير</b><br>' + TT.esc(p.summary || "") + '<div style="margin:8px 0">' + rows.join("<br>") + '</div><div style="display:flex;gap:8px"><button class="btn btn-primary btn-sm" type="button">موافق — نفّذ</button><button class="btn btn-ghost btn-sm" type="button">لأ</button></div>');
     var bs = box.querySelectorAll("button");
@@ -502,7 +521,7 @@
     bs[0].onclick = function(){
       bs[0].disabled = bs[1].disabled = true;
       var jobs = [];
-      if(p.pricing) jobs.push(function(){ return save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing", same:S.cfg.same, cross:S.cfg.cross, cutKm:S.cfg.cutKm, outPerKm:S.cfg.outPerKm, outKm:S.cfg.outKm }, p.pricing)); });
+      if(p.pricing) jobs.push(function(){ return save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing" }, p.pricing)); });
       (p.zones || []).forEach(function(z){ jobs.push(function(){ var c = clone(TT.byId(S.zones, z.id)); if(z.same != null) c.same = z.same; if(z.cross != null) c.cross = z.cross; return save("zones", z.id, c); }); });
       jobs.reduce(function(pr, f){ return pr.then(f); }, Promise.resolve())
         .then(function(){ bs[0].textContent = "اتنفّذ ✓"; TT.toast("التغيير اتحفظ ✓"); })
@@ -803,7 +822,7 @@
       : '<div class="empty">مفيش رحلات منتهية بعد.</div>';
   }
 
-  var RK = { impostor:"السائق مش هو اللي في الصورة", overcharge:"طلب أكتر من السعر", late:"اتأخر أو ماجاش", behaviour:"أسلوب السائق", lost:"حاجة منسية", suggest:"اقتراح", other:"حاجة تانية" };
+  var RK = { sos:"⚠ استغاثة من راكب", plate:"التوكتوك مش معلّق اللوحة", impostor:"السائق مش هو اللي في الصورة", overcharge:"طلب أكتر من السعر", late:"اتأخر أو ماجاش", behaviour:"أسلوب السائق", lost:"حاجة منسية", suggest:"اقتراح", other:"حاجة تانية" };
 
   /* ---------- طلب مستنّي +٣ دقايق ---------- */
   var STALE_MS = 3 * 60 * 1000;
@@ -906,6 +925,9 @@
         + '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(r.riderPhone)+'">اتصل بالراكب</a>'
         + (d ? '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(d.phone)+'">اتصل بالسائق</a>' : '')
         + (r.status!=="closed" && r.deleteReq && (r.riderPhone || r.phone) ? '<button class="btn btn-ghost btn-sm" style="color:#A9382B" data-wipe="'+TT.esc(r.riderPhone || r.phone)+'" data-role="'+(r.deleteRole === "driver" ? "driver" : "rider")+'">اتأكدت — احذف كل بياناته</button>' : '')
+        + (r.kind==="sos" && r.loc ? '<a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" href="https://maps.google.com/?q='+r.loc.lat+','+r.loc.lng+'">مكان الراكب على الخريطة</a>' : '')
+        + (r.status==="open" && r.kind==="impostor" ? '<button class="btn btn-ghost btn-sm" data-falserep="'+TT.esc(r.id)+'" title="الإلغاء بيتحسب على الراكب (وممكن تعويض للسائق)، والسائق بيرجع يشتغل">البلاغ مش صحيح</button>' : '')
+        + (r.status==="false" ? '<span class="chip c-neutral">بلاغ مش صحيح'+(r.feeAdded?' · تعويض '+r.feeAdded+' ج':'')+'</span>' : '')
         + (r.status!=="closed" ? '<button class="btn btn-ghost btn-sm" data-closerep="'+TT.esc(r.id)+'">اتحلّ — اقفل</button>' : '')
         + (r.status!=="closed" && d ? '<button class="btn btn-ghost btn-sm" style="color:#A9382B" data-confirmrep="'+TT.esc(r.id)+'" title="البلاغ صح — بيمنع السائق من الفضي ٣٠ يوم ومن الذهبي ٦٠ يوم">البلاغ صح — اقفل</button>' : '')
         + '</div></div>';
@@ -1097,6 +1119,8 @@
 
   $("rtPhone").addEventListener("input", function(){
     var k = this.value.replace(/\D/g, "").slice(-10), r = k.length >= 9 ? (S.riders || []).find(function(x){ return x.id === k; }) : null;
+    var dr = r && r.dRateCount ? " · تقييم السواقين ليه " + (r.dRateSum / r.dRateCount).toFixed(1) + "★ (" + r.dRateCount + ")" + ((r.dNotes || []).length ? " · آخر ملاحظات: " + r.dNotes.slice(-3).map(function(n){ return n.stars + "★ " + (n.tags || []).join("، "); }).join(" | ") : "") : "";
+    setTimeout(function(){ if(dr) $("rtMsg").textContent += dr; }, 0);
     $("rtMsg").textContent = k.length < 9 ? "" : r ? (r.name ? r.name + " · " : "") + (freeOf(r) ? "لسه في الـ ٣ شهور المجانية · " : "") + "رصيده " + (+(r.credit || 0)) + " ج" : "الرقم ده لسه ماطلبش من التطبيق";
   });
   $("rtGo").addEventListener("click", function(){
@@ -1409,8 +1433,9 @@
 
   /* ---------- التسعير ---------- */
   function prCfg(){ var c = S.cfgRaw || {}, n = function(v, d){ return (v === undefined || v === null || v === "" || !isFinite(+v) || +v < 0) ? d : +v; };
-    return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15 }; }
-  var P_IDS = [["pKm","perKm"],["pMin","minFare"],["pFree","freeMin"],["pWaitMin","waitPerMin"],["pMaxWait","maxWaitMin"]];
+    return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15,
+      farFromKm: n(c.farFromKm, 2), farBase: n(c.farBase, 10), farPerKm: n(c.farPerKm, 5), farMaxKm: n(c.farMaxKm, 5) || 5, nextRadiusM: n(c.nextRadiusM, 200) || 200, nextStartKm: n(c.nextStartKm, 1) || 1, cancelFee: n(c.cancelFee, 5), cancelFreeN: n(c.cancelFreeN, 3) }; }
+  var P_IDS = [["pKm","perKm"],["pMin","minFare"],["pFree","freeMin"],["pWaitMin","waitPerMin"],["pMaxWait","maxWaitMin"],["pFarFrom","farFromKm"],["pFarBase","farBase"],["pFarPerKm","farPerKm"],["pFarMax","farMaxKm"],["pNextR","nextRadiusM"],["pNextStart","nextStartKm"],["pCxlFee","cancelFee"],["pCxlFree","cancelFreeN"]];
   function pVals(){
     var d = prCfg(), o = {};
     P_IDS.forEach(function(x){ var v = parseFloat($(x[0]).value); o[x[1]] = isNaN(v) ? d[x[1]] : v; });
@@ -1530,6 +1555,9 @@
       api("admin-wipe", { method:"POST", retry:false, body:{ phone:id, role: el.getAttribute("data-role") || "rider" } }).then(function(r){ TT.toast("اتحذف ✓ (" + r.cleared + " مشوار)"); load(); }).catch(function(e){ TT.toast(e.message); });
     } else if((id = el.getAttribute("data-closerep"))){
       c = clone(TT.byId(S.reports,id)); c.status = "closed"; c.closedAt = Date.now(); save("reports", id, c);
+    } else if((id = el.getAttribute("data-falserep"))){
+      if(!confirm("البلاغ ده مش صحيح؟\nالإلغاء هيتحسب على الراكب، والسائق هيرجع يشتغل.")) return;
+      api("admin-false-report", { method:"POST", retry:false, body:{ reportId:id } }).then(function(j){ TT.toast("تمام ✓" + (j.feeAdded ? " — اتضاف تعويض للسائق " + j.feeAdded + " ج على الراكب" : "")); load(); }).catch(function(e){ TT.toast(e.message); load(); });
     } else if((id = el.getAttribute("data-cancel"))){
       if(!confirm("إلغاء المشوار؟")) return;
       api("admin-cancel", { method:"POST", retry:false, body:{ requestId:id } }).then(function(){ TT.toast("اتلغى ✓"); load(); }).catch(function(e){ TT.toast(e.message); load(); });
