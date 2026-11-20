@@ -2337,6 +2337,24 @@ export async function onRequest({ request, env, params }) {
       const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind='archive' ORDER BY updated DESC LIMIT 500").all();
       return json({ items: (results || []).map((x) => { const a = JSON.parse(x.data); return { id: a.id, role: a.role, phone: a.phone, name: a.name, at: a.at, exp: a.exp, rides: (a.rides || []).length }; }) });
     }
+    /* لينك جوجل ماب القصير (maps.app.goo.gl) ← اللينك الكامل علشان نطلّع منه الإحداثيات — للإدارة بس، وللينكات جوجل بس */
+    if (route === "admin-maplink" && method === "POST") {
+      const b = await parseBody(request);
+      let u = str(b.url, 600);
+      const okHost = (h) => /(^|\.)(google\.[a-z.]+|goo\.gl|app\.goo\.gl)$/i.test(h);
+      try {
+        for (let i = 0; i < 6; i++) {
+          const x = new URL(u);
+          if (x.protocol !== "https:" || !okHost(x.hostname)) return json({ error: "ده مش لينك جوجل ماب" }, 400);
+          if (!/goo\.gl$/i.test(x.hostname)) break;
+          const r = await fetch(u, { method: "GET", redirect: "manual", headers: { "user-agent": "Mozilla/5.0" } });
+          const loc = r.headers.get("location");
+          if (!loc) break;
+          u = new URL(loc, u).toString();
+        }
+      } catch (e) { return json({ error: "اللينك مااتفتحش — جرّب تنسخ الأرقام بدله" }, 400); }
+      return json({ url: u });
+    }
     /* حساب مراجعة جوجل: راكب + سائق تجريبيين، كود السائق ثابت ومابيخلصش، ومابيشوفوش غير بعض */
     if (route === "admin-review" && method === "POST") {
       const b = await parseBody(request);
