@@ -380,6 +380,7 @@
         </div>
       </div>
       <div class="field"><label for="cAdminPhone">رقم الإدارة (بيظهر للركاب في «الدعم»)</label><input id="cAdminPhone" inputmode="tel" placeholder="01xxxxxxxxx"></div>
+      <div class="field"><label for="cIosMin">أقل نسخة آيفون مسموحة (اللي أقدم منها لازم يحدّث من App Store)</label><input id="cIosMin" inputmode="decimal" placeholder="مثلاً 1.0.0 — سيبها فاضية لو مش محتاج" dir="ltr"></div>
       <button class="btn btn-ghost" id="saveCfg">حفظ</button>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
         <b>نسخة احتياطية</b>
@@ -965,6 +966,7 @@
     if(document.activeElement !== $("cMonth")) $("cMonth").value = S.cfg.month;
     if(document.activeElement !== $("cGrace")) $("cGrace").value = S.cfg.grace;
     if(document.activeElement !== $("cAdminPhone")) $("cAdminPhone").value = S.cfg.adminPhone || "";
+    if($("cIosMin") && document.activeElement !== $("cIosMin")) $("cIosMin").value = (S.cfgRaw && S.cfgRaw.iosMin) || "";
     $("cCreditPaused").checked = !!S.cfg.creditOn;
     if(document.activeElement !== $("cTripFee")) $("cTripFee").value = S.cfg.tripFee || 1;
     var paidD = S.drivers.filter(function(d){ return !freeOf(d); }).length, paidR = (S.riders || []).filter(function(r){ return !freeOf(r); }).length;
@@ -1553,7 +1555,7 @@
 
   $("saveCfg").addEventListener("click", function(){
     var w = parseInt($("cWeek").value,10), m = parseInt($("cMonth").value,10), g = parseInt($("cGrace").value,10);
-    var body = Object.assign(clone(S.cfgRaw || {}), { id:"pricing", paidFrom: $("cPaidFrom").value || "", week: isNaN(w)?30:w, month: isNaN(m)?100:m, grace: isNaN(g)?3:g, adminPhone: $("cAdminPhone").value.replace(/\D/g,"") });
+    var body = Object.assign(clone(S.cfgRaw || {}), { id:"pricing", paidFrom: $("cPaidFrom").value || "", week: isNaN(w)?30:w, month: isNaN(m)?100:m, grace: isNaN(g)?3:g, adminPhone: $("cAdminPhone").value.replace(/\D/g,"") , iosMin: String(($("cIosMin") && $("cIosMin").value) || "").trim().replace(/[^0-9.]/g, "").slice(0, 12)});
     var tf = parseFloat($("cTripFee").value);
     var on = $("cCreditPaused").checked;
     if(on && !S.cfg.creditOn && !confirm("هتشغّل نظام الرصيد؟\nكل راكب وسائق هياخد ٩٠ يوم مجاني من النهارده، وبعدها لازم يشحن. بلّغ الناس قبلها.")){ $("cCreditPaused").checked = false; return; }

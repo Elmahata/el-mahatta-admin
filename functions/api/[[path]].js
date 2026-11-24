@@ -406,6 +406,7 @@ async function pushFam(env, riderPhone, item, onlyAuto) {
       done: [who + " وصل بالسلامة ✓", ""],
     }[item.type] || ["المحطة", ""];
     await pushTo(env, "rider", k.fam, { kind: item.type === "sos" ? "sos" : "family", title: T[0], body: T[1], url: "/?fam=1", tag: "fam-" + k.rider });
+    if ((item.type === "start" || item.type === "sos") && item.requestId) { try { await laStartFam(env, k.fam, await getDoc(env, "requests", item.requestId), item); } catch (e) {} }
   }
   return mine.length;
 }
@@ -434,6 +435,82 @@ async function fcmAccess(sa) {
   return FCM_TOK.t;
 }
 /** يبعت إشعار لصاحب الرقم ده (role: driver | rider). أي غلطة بتتتجاهل — الإشعار إضافة، ومش بيوقف الطلب */
+/* «نقاطي» — النقاط بتتحسب هنا بس (مش على الموبايل)، وبتتحفظ مع آخر ٢٠ حركة */
+const PTS_RIDE = 10, PTS_FIVE = 5;
+async function addPoints(env, kind, id, n, r, five) {
+  if (!id) return;
+  const doc = await getDoc(env, kind, id);
+  if (!doc && kind === "drivers") return;
+  const x = doc || { id, phone: digits(r.bookerPhone || r.riderPhone) };
+  const key = r.id + (five ? ":5" : "");
+  if ((x.ptsLog || []).some((l) => l.k === key)) return;
+  x.points = (+x.points || 0) + n;
+  x.ptsLog = [{ k: key, p: n, t: ((r.from && r.from.label) || "") + " ← " + ((r.to && r.to.label) || ""), five: Boolean(five), at: Date.now() }, ...(x.ptsLog || [])].slice(0, 20);
+  await putDoc(env, kind, id, x);
+}
+/* Live Activity (آيفون): كارت الرحلة على شاشة القفل والجزيرة الديناميكية — السيرفر بيحدّثه (كل ١٠ ثواني بالكتير) حتى لو التطبيق نايم */
+function laState(r, d) {
+  const name = String((r.driverName || (d && d.name) || "")).trim().split(/\s+/)[0] || "";
+  const title = [name, (d && d.plate) || ""].filter(Boolean).join(" · ") || "المحطة";
+  if (r.status === "pending") return { title: "المحطة", text: "بندوّر على أقرب توكتوك…", progress: -1 };
+  if (r.status !== "assigned") return { title, text: r.status === "done" ? "حمد الله على السلامة ✓" : "الرحلة اتلغت", progress: 1 };
+  if (r.arrivedAt && !r.startedAt) return { title, text: "السائق وصل — مستنيك", progress: 1 };
+  const g = r.startedAt ? r.to : r.from, loc = d && d.loc;
+  if (!loc || !g || !isFinite(+g.lat)) return { title, text: r.startedAt ? "في الطريق" : "جاي لك", progress: -1 };
+  const m = meters(loc, g), k = r.startedAt ? "s" : "p";
+  r.la.m0 = { ...(r.la.m0 || {}), [k]: Math.max((r.la.m0 && r.la.m0[k]) || m, m) };
+  const m0 = r.la.m0[k], mins = Math.max(1, Math.round(m * 1.3 / 250));
+  const where = r.startedAt ? "في الطريق لـ " + ((r.to && r.to.label) || "وجهتك") : "جاي لك";
+  return { title, text: where + " · حوالي " + mins + (mins >= 3 && mins <= 10 ? " دقايق" : " دقيقة"), progress: m0 < 30 ? 1 : Math.max(0, Math.min(1, 1 - m / m0)) };
+}
+async function laPush(env, r, d, end) {
+  if (!r || !r.la) return;
+  if (!end && r.la.at && Date.now() - r.la.at < 10000) return;
+  const sa = fcmSA(env); if (!sa) return;
+  const now = Math.floor(Date.now() / 1000);
+  const st = laState(r, d);
+  const send = async (fcm, la, state) => {
+    try {
+      const at = await fcmAccess(sa);
+      await fetch("https://fcm.googleapis.com/v1/projects/" + sa.project_id + "/messages:send", {
+        method: "POST", headers: { authorization: "Bearer " + at, "content-type": "application/json" },
+        body: JSON.stringify({ message: { token: fcm, apns: { live_activity_token: la, headers: { "apns-priority": end ? "10" : "5" }, payload: { aps: { timestamp: now, event: end ? "end" : "update", "content-state": state, ...(end ? { "dismissal-date": now + 90 } : {}) } } } } }),
+      });
+    } catch (e) {}
+  };
+  if (r.la.token) {
+    const p = await getDoc(env, "push", "rider_" + l10(r.bookerPhone || r.riderPhone));
+    if (p && p.token && p.ios) await send(p.token, r.la.token, st);
+  }
+  /* أهل الراكب اللي عندهم آيفون: نفس الكارت باسم قريبهم ومن غير زرار الاستغاثة */
+  const who = String(r.riderName || "").trim().split(/\s+/)[0] || "قريبك";
+  for (const f of (r.la.fam || [])) {
+    const p = await getDoc(env, "push", "rider_" + f.phone);
+    if (p && p.token && p.ios) await send(p.token, f.la, { ...st, title: who + " — " + st.title, fam: true });
+  }
+  r.la = { ...r.la, at: Date.now() };
+  await putDoc(env, "requests", r.id, r);
+}
+/* آيفون الأهل: أول ما الراكب يركب، الكارت يظهر على شاشة قفلهم لوحده (push-to-start — iOS 17.2+) */
+async function laStartFam(env, famPhone, r, item) {
+  const sa = fcmSA(env); if (!sa || !r) return;
+  const p = await getDoc(env, "push", "rider_" + famPhone);
+  if (!p || !p.token || !p.ios || !p.laStart) return;
+  const who = String(r.riderName || "").trim().split(/\s+/)[0] || "قريبك";
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const at = await fcmAccess(sa);
+    await fetch("https://fcm.googleapis.com/v1/projects/" + sa.project_id + "/messages:send", {
+      method: "POST", headers: { authorization: "Bearer " + at, "content-type": "application/json" },
+      body: JSON.stringify({ message: { token: p.token, apns: { live_activity_token: p.laStart, headers: { "apns-priority": "10" }, payload: { aps: {
+        timestamp: now, event: "start", "attributes-type": "RideAttributes",
+        attributes: { rideId: r.id, share: r.shareToken || "" },
+        "content-state": { title: who + " — " + (item.driver || "راكب توكتوك"), text: item.type === "sos" ? "⚠ استغاثة — دوس علشان تشوف مكانه" : "في الطريق لـ " + (item.to || "وجهته"), progress: -1, fam: true },
+        alert: { title: item.type === "sos" ? "⚠ طوارئ من " + who : who + " ركب توكتوك", body: "تابع الرحلة من شاشة القفل" },
+      } } } } }),
+    });
+  } catch (e) {}
+}
 async function pushTo(env, role, phone10, data) {
   const sa = fcmSA(env);
   if (!sa || !phone10) return false;
@@ -452,12 +529,17 @@ async function pushTo(env, role, phone10, data) {
       : data.kind === "msg" ? ["mh-msg", "msg"]
       : /وصل عندك/.test(strs.title || "") ? ["mh-arrive", "arrived"]
       : data.kind === "ride" ? ["mh-ride", "accepted"] : ["mh-alerts", "confirm"];
-    const android = p.native
+    /* السائق في التطبيق الأصلي: «طلب جديد» بيروح data بس (fs=1) — التطبيق نفسه (Kotlin) بيعرضه شاشة كاملة فوق القفل + زرار «اقبل» */
+    const fsReq = p.native && role === "driver" && data.kind === "request" && data.rid;
+    const android = fsReq ? { priority: "HIGH", ttl: ttl + "s" } : p.native
       ? { priority: "HIGH", ttl: ttl + "s", notification: { title: strs.title || "المحطة", body: strs.body || "", channel_id: ch[0], sound: ch[1], icon: "ic_stat_mahatta", color: "#3FBCA6", default_vibrate_timings: true, notification_priority: "PRIORITY_MAX", ...(strs.tag ? { tag: strs.tag } : {}) } }
       : { priority: "HIGH" };
     const r = await fetch("https://fcm.googleapis.com/v1/projects/" + sa.project_id + "/messages:send", {
       method: "POST", headers: { authorization: "Bearer " + at, "content-type": "application/json" },
-      body: JSON.stringify({ message: { token: p.token, data: strs, android, ...(p.native ? {} : { webpush: { headers: { Urgency: "high", TTL: ttl } } }) } }),
+      body: JSON.stringify({ message: p.ios
+        /* آيفون (الراكب): الإشعار بنغمة التطبيق نفسها (ملفات .wav جوه التطبيق) */
+        ? { token: p.token, data: strs, apns: { headers: { "apns-priority": "10" }, payload: { aps: { alert: { title: strs.title || "المحطة", body: strs.body || "" }, sound: ch[1] + ".wav", "thread-id": strs.tag || "mh", "interruption-level": data.kind === "sos" ? "time-sensitive" : "active" } } } }
+        : { token: p.token, data: fsReq ? { ...strs, fs: "1" } : strs, android, ...(p.native ? {} : { webpush: { headers: { Urgency: "high", TTL: ttl } } }) } }),
     });
     if (r.status === 404 || r.status === 400) await env.DB.prepare("DELETE FROM docs WHERE kind=? AND id=?").bind("push", id).run();
     return r.ok;
@@ -552,7 +634,7 @@ async function pushDrivers(env, r) {
     const iso = await isolateOn(env);
     const list = drivers.filter((d) => (!iso || Boolean(d.reviewer) === Boolean(r.review)) && d.active !== false && d.online !== false && !busy.has(d.id) && Date.now() - (d.lastSeen || 0) < 12 * 3600e3 && inReach(r, d, r.farOk ? Infinity : 0, r.pr));
     const body = (r.from && r.from.label ? r.from.label : "") + " ← " + (r.to && r.to.label ? r.to.label : "") + " · " + r.fare + " ج";
-    await Promise.all(list.map((d) => pushTo(env, "driver", l10(d.phone), { kind: "request", title: "طلب جديد · " + r.fare + " ج", body, url: "/driver.html", tag: "req" })));
+    await Promise.all(list.map((d) => pushTo(env, "driver", l10(d.phone), { kind: "request", title: "طلب جديد · " + r.fare + " ج", body, url: "/driver.html", tag: "req", rid: r.id, fare: r.fare, from: (r.from && r.from.label) || "", to: (r.to && r.to.label) || "" })));
   } catch (e) {}
 }
 
@@ -626,6 +708,13 @@ async function roadKm(a, b) {
     return m > 0 ? m / 1000 : null;
   } catch (e) { return null; }
 }
+/* «الراكب عايز يكمّل»: تكملة بعد نقطة الإنزال بالعداد — (المسافة الأصلية + الإضافية الفعلية) × سعر الكيلو + الانتظار، مقرّبة لأعلى ٥ */
+const EXT_MAX_KM = 5, EXT_ASK_MS = 60e3;
+function extState(r) { if (!r || !r.ext) return null; return r.ext.state === "ask" && Date.now() - (r.ext.askAt || 0) > EXT_ASK_MS ? "no" : r.ext.state; }
+function extUsed(r) { const s = extState(r); return s === "on" || s === "cap"; }
+function metered(r) { return Boolean(r && (r.multi || hasStops(r) || extUsed(r))); }
+function kmOf(r) { return r.multi ? r : { ...r, meter: { km: +((r.distKm || 0) + (extUsed(r) ? +r.ext.km || 0 : 0)).toFixed(3) } }; }
+function extView(r) { return r && r.ext ? { state: extState(r), askAt: r.ext.askAt || null, km: +(+r.ext.km || 0).toFixed(2), origKm: r.distKm || 0, maxKm: EXT_MAX_KM } : null; }
 function meterView(r, pr, now) {
   const free = pr.freeMin * 60e3, max = pr.maxWaitMin * 60e3;
   const ws = (r.waits || []).concat(r.waitOn ? [{ s: r.waitOn.s, e: now }] : []);
@@ -1137,9 +1226,9 @@ export async function onRequest({ request, env, params }) {
       return json({
         id: r.id, status: r.status, fare: r.fare, outside: Boolean(r.outside), distKm: r.distKm ?? null, perKm: r.perKm || null, driver, driverLoc, from: pt(r.from), to: pt(r.to), createdAt: r.createdAt, assignedAt: r.assignedAt || null, scheduledAt: r.scheduledAt || null, discount: r.discount || 0,
         code: r.status === "assigned" && r.codeOn ? r.code : null, codeOn: Boolean(r.codeOn), startedAt: r.startedAt || null,
-        multi: Boolean(r.multi), meter: (r.multi || hasStops(r)) && r.startedAt && r.status === "assigned" ? meterView(r.multi ? r : { ...r, meter: { km: r.distKm || 0 } }, prT, Date.now()) : null, bill: r.bill || null,
+        multi: Boolean(r.multi), meter: metered(r) && r.startedAt && r.status === "assigned" ? meterView(kmOf(r), prT, Date.now()) : null, ext: extView(r), bill: r.bill || null,
         stops: (r.stops || []).map((s) => ({ lat: s.lat, lng: s.lng, label: s.label })), maxStops: prT.maxStops,
-        stopReq: r.stopReq ? { label: r.stopReq.label, fare: r.stopReq.fare, km: r.stopReq.km, at: r.stopReq.at } : null, stopNo: r.stopNo || null,
+        stopReq: r.stopReq ? { label: r.stopReq.label, fare: r.stopReq.fare, km: r.stopReq.km, at: r.stopReq.at, replace: Boolean(r.stopReq.replace) } : null, stopNo: r.stopNo || null,
         baseFare: baseOf(r), penalty: r.penalty || 0, farExtra: r.farExtra || 0, farKm: r.farKm || 0, farAsk, reserved,
         sosOn: Boolean(r.sosOn), cancelFee: await cxlRisk(env, r, prT), anom: r.anom && !r.anom.ok ? { kind: r.anom.kind, at: r.anom.at, esc: Boolean(r.anom.esc) } : null, riderLocOn: Boolean(r.riderLoc && !r.startedAt),
         arrivedAt: r.arrivedAt || null, cancelReason: r.cancelReason || null,
@@ -1184,6 +1273,31 @@ export async function onRequest({ request, env, params }) {
       if (!d || !d.shareTok || !tokOk(url.searchParams.get("s"), d.shareTok)) return json({ error: "اللينك ده مش صحيح" }, 404);
       const fresh = d.loc && Date.now() - d.loc.at < 3 * 60e3;
       return json({ driver: { name: name2(d.name), plate: d.plate || "", photo: d.photo || "" }, online: d.online !== false && fresh, onTrip: Boolean(d.watchId), driverLoc: fresh ? { lat: d.loc.lat, lng: d.loc.lng, h: d.loc.h } : null, at: d.loc ? d.loc.at : null });
+    }
+
+    /* مشاركة الرحلة من التطبيق الأصلي (خدمة Kotlin): مكان موبايل الراكب طول الرحلة حتى والشاشة مقفولة.
+       بيرجّع 409 أول ما الرحلة تخلص أو تتلغي ← الخدمة بتقف لوحدها */
+    if (route === "trip-loc" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.id, 40));
+      if (!r || !tokOk(b.token, r.token)) return json({ error: "غير مصرّح" }, 401);
+      if (r.status !== "assigned") return json({ error: "الرحلة خلصت", stop: true }, 409);
+      const lat = +b.lat, lng = +b.lng;
+      if (!isFinite(lat) || !isFinite(lng)) return json({ error: "مكان غير صحيح" }, 400);
+      if (r.riderLive && Date.now() - r.riderLive.at < 1500) return json({ ok: true });
+      r.riderLive = { lat: +lat.toFixed(6), lng: +lng.toFixed(6), at: Date.now(), acc: Math.round(+b.acc || 0) || null };
+      await putDoc(env, "requests", r.id, r);
+      return json({ ok: true });
+    }
+
+    /* «نقاطي» للراكب */
+    if (route === "points" && method === "POST") {
+      const b = await parseBody(request);
+      const phone = digits(b.phone);
+      const deny = await needSession(request, env, phone, "rider");
+      if (deny) return deny;
+      const rd = await getDoc(env, "riders", riderKey(phone));
+      return json({ points: (rd && rd.points) || 0, log: (rd && rd.ptsLog) || [] });
     }
 
     /* «إنت كويس؟» — الراكب ردّ «تمام» */
@@ -1242,7 +1356,9 @@ export async function onRequest({ request, env, params }) {
       }
       const first = (r.riderName || "").trim().split(/\s+/)[0] || "";
       return json({
-        status: r.status, rider: first, sos: Boolean(r.sosOn), riderLoc: r.sosOn && r.sosOn.loc ? r.sosOn.loc : null,
+        status: r.status, rider: first, sos: Boolean(r.sosOn),
+        /* مكان موبايل الراكب: وقت الاستغاثة، أو من خدمة مشاركة الرحلة الأصلية (آخر ١٠ دقايق) */
+        riderLoc: r.sosOn && r.sosOn.loc ? r.sosOn.loc : (r.riderLive && Date.now() - r.riderLive.at < 10 * 60e3 ? r.riderLive : null),
         stops: (r.stops || []).map((s) => ({ lat: s.lat, lng: s.lng, label: s.label })),
         from: { label: r.from.label, lat: r.from.lat, lng: r.from.lng },
         to: { label: r.to.label, lat: r.to.lat, lng: r.to.lng }, driver, driverLoc,
@@ -1345,6 +1461,8 @@ export async function onRequest({ request, env, params }) {
         await putDoc(env, "drivers", d.id, { ...d, ratingSum: (d.ratingSum || 0) + stars, ratingCount: (d.ratingCount || 0) + 1,
           tagCount: tc, tagRated: (d.tagRated || 0) + (tags.length ? 1 : 0), redBy, redAlert,
           reviews: (d.reviews || []).concat(note || tags.length ? [{ s: stars, n: note, t: tags, at: Date.now(), r: rk.slice(-4) }] : []).slice(-30) });
+        /* «نقاطي»: ٥ نقاط زيادة للسائق لو اتقيّم ٥ نجوم */
+        if (stars === 5) { try { await addPoints(env, "drivers", d.id, PTS_FIVE, r, true); } catch (e) {} }
       }
       return json({ ok: true });
     }
@@ -1415,7 +1533,47 @@ export async function onRequest({ request, env, params }) {
         if (deny) return deny;
       }
       const role = b.role === "driver" ? "driver" : "rider";
-      await putDoc(env, "push", role + "_" + l10(phone), { token, native: b.native === true, at: Date.now() });
+      await putDoc(env, "push", role + "_" + l10(phone), { token, native: b.native === true, ios: b.platform === "ios", at: Date.now() });
+      return json({ ok: true });
+    }
+
+    /* آيفون: توكن «ابدأ الكارت» (علشان كارت رحلة قريبك يظهر على شاشة القفل لوحده) */
+    if (route === "la-start" && method === "POST") {
+      const b = await parseBody(request);
+      const phone = digits(b.phone);
+      const deny = await needSession(request, env, phone, "rider");
+      if (deny) return deny;
+      const la = str(b.la, 400);
+      if (!/^[0-9a-f]{32,400}$/i.test(la)) return json({ error: "توكن غير صحيح" }, 400);
+      const p = await getDoc(env, "push", "rider_" + l10(phone));
+      if (!p) return json({ error: "شغّل الإشعارات الأول" }, 409);
+      await putDoc(env, "push", "rider_" + l10(phone), { ...p, laStart: la });
+      return json({ ok: true });
+    }
+    /* آيفون الأهل: الكارت ابتدى ← التطبيق بيبعت توكن التحديث (بتوكن المشاركة بس) */
+    if (route === "la-fam" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.id, 40));
+      if (!r || !tokOk(b.s, r.shareToken)) return json({ error: "غير مصرّح" }, 401);
+      const la = str(b.la, 400), fp = l10(digits(b.phone));
+      if (!/^[0-9a-f]{32,400}$/i.test(la) || !/^1\d{9}$/.test(fp)) return json({ error: "بيانات غير صحيحة" }, 400);
+      const fam = ((r.la && r.la.fam) || []).filter((x) => x.phone !== fp).concat([{ phone: fp, la }]).slice(-5);
+      r.la = { ...(r.la || {}), fam, at: 0 };
+      await putDoc(env, "requests", r.id, r);
+      if (r.driverId && r.status === "assigned") { const d = await getDoc(env, "drivers", r.driverId); if (d && d.laRid !== r.id) { d.laRid = r.id; await putDoc(env, "drivers", d.id, d); } }
+      return json({ ok: true });
+    }
+
+    /* آيفون: التطبيق بيبعت توكن الـ Live Activity بتاع الرحلة ← السيرفر يحدّث الكارت من مكان السائق */
+    if (route === "la-token" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.id, 40));
+      if (!r || !tokOk(b.token, r.token)) return json({ error: "غير مصرّح" }, 401);
+      const la = str(b.la, 400);
+      if (!/^[0-9a-f]{32,400}$/i.test(la)) return json({ error: "توكن غير صحيح" }, 400);
+      r.la = { ...(r.la || {}), token: la, at: 0 };
+      await putDoc(env, "requests", r.id, r);
+      if (r.driverId && r.status === "assigned") { const d = await getDoc(env, "drivers", r.driverId); if (d && d.laRid !== r.id) { d.laRid = r.id; await putDoc(env, "drivers", d.id, d); } }
       return json({ ok: true });
     }
 
@@ -1476,6 +1634,9 @@ export async function onRequest({ request, env, params }) {
       if (sub === "sos" && method === "POST") {
         const r = await getDoc(env, "requests", str(b.requestId, 40));
         if (!r || !safeEqual(str(b.token, 80), String(r.token || "")) || l10(r.riderPhone) !== me) return json({ error: "الرحلة مش موجودة" }, 404);
+        /* نفس الاستغاثة اتبعتت مرتين (النت فاصل/إعادة محاولة): نرجّع نفس الرد من غير ما نبلّغ الأهل تاني */
+        const idem = str(b.idem || request.headers.get("x-idem") || "", 60);
+        if (idem && r.sosIdem && r.sosIdem.id === idem) return json({ ok: true, sent: r.sosIdem.sent || 0, dup: true });
         const d = r.driverId ? await getDoc(env, "drivers", r.driverId) : null;
         const lat = +b.lat, lng = +b.lng;
         const n = await pushFam(env, r.riderPhone, {
@@ -1489,13 +1650,24 @@ export async function onRequest({ request, env, params }) {
           await putDoc(env, "reports", sid, { id: sid, requestId: r.id, driverId: r.driverId || r.nextDriver || "", riderName: r.riderName, riderPhone: r.riderPhone, kind: "sos", fare: r.fare, loc: loc0, note: "استغاثة من الراكب" + (d ? " — السائق " + d.name + (d.plate ? " · لوحة " + d.plate : "") : ""), status: "open", createdAt: Date.now() });
           r.sosReport = sid;
         }
-        await putDoc(env, "requests", r.id, { ...r, sosAt: r.sosAt || Date.now(), sosOn: { at: (r.sosOn && r.sosOn.at) || Date.now(), loc: loc0 || (r.sosOn && r.sosOn.loc) || null } });
+        await putDoc(env, "requests", r.id, { ...r, sosAt: r.sosAt || Date.now(), sosOn: { at: (r.sosOn && r.sosOn.at) || Date.now(), loc: loc0 || (r.sosOn && r.sosOn.loc) || null }, ...(idem ? { sosIdem: { id: idem, sent: n } } : {}) });
         return json({ ok: true, sent: n });
       }
       /* مكان الراكب وقت الاستغاثة (والتطبيق مفتوح) — كل ثانيتين */
       if (sub === "sos-loc" && method === "POST") {
         const r = await getDoc(env, "requests", str(b.requestId, 40));
         if (!r || !safeEqual(str(b.token, 80), String(r.token || "")) || !r.sosOn) return json({ ok: false });
+        /* الموقع اتقفل من موبايل الراكب وقت الاستغاثة (التطبيق الأصلي) ← تنبيه للأهل والإدارة (مرة كل ٥ دقايق بالكتير) */
+        if (b.gpsOff === true) {
+          if (r.sosOn.gpsOffAt && Date.now() - r.sosOn.gpsOffAt < 5 * 60e3) return json({ ok: true });
+          r.sosOn = { ...r.sosOn, gpsOffAt: Date.now() };
+          await putDoc(env, "requests", r.id, r);
+          const last = r.sosOn.loc || null;
+          try { await pushFam(env, r.riderPhone, { type: "sos", requestId: r.id, share: r.shareToken || "", to: "موقع موبايله اتقفل وقت الاستغاثة — آخر مكان ظاهر على الخريطة", loc: last ? { lat: last.lat, lng: last.lng } : null }, false); } catch (e) {}
+          const gid = uid();
+          await putDoc(env, "reports", gid, { id: gid, requestId: r.id, driverId: r.driverId || "", riderName: r.riderName, riderPhone: r.riderPhone, kind: "sos", fare: r.fare, loc: last, note: "الموقع اتقفل من موبايل الراكب وقت الاستغاثة", status: "open", createdAt: Date.now() });
+          return json({ ok: true });
+        }
         const lat = +b.lat, lng = +b.lng;
         if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return json({ ok: false });
         if (r.sosOn.loc && Date.now() - (r.sosOn.loc.at || 0) < 1500) return json({ ok: true });
@@ -1567,7 +1739,10 @@ export async function onRequest({ request, env, params }) {
       if (!r || !tokOk(b.token, r.token)) return json({ error: "غير مصرّح" }, 401);
       if (r.status !== "assigned" || !r.startedAt) return json({ error: "التوقف بيتضاف والرحلة شغالة بس" }, 409);
       const pr = PR(await pricingCfg(env));
-      if ((r.stops || []).length >= pr.maxStops) return json({ error: "أقصى حاجة " + pr.maxStops + " توقفات في المشوار" }, 409);
+      /* «غيّر الوجهة»: نفس الطريقة، بس النقطة الجديدة بتبقى الوجهة نفسها */
+      const repl = b.replace === true;
+      if (repl && (r.multi || extUsed(r))) return json({ error: "العداد شغّال — الأجرة بتتحسب بالمسافة الفعلية" }, 409);
+      if (!repl && (r.stops || []).length >= pr.maxStops) return json({ error: "أقصى حاجة " + pr.maxStops + " توقفات في المشوار" }, 409);
       if (r.stopReq && Date.now() - (r.stopReq.at || 0) < 2 * 60e3) return json({ error: "فيه توقف مستني رد السائق" }, 409);
       const { places } = await readDocs(env, ["places"]);
       let s = null;
@@ -1575,12 +1750,31 @@ export async function onRequest({ request, env, params }) {
       else { const l = resolveLeg(places, b); if (l) s = { lat: l.lat, lng: l.lng, label: l.label }; }
       if (!s) return json({ error: "حدّد مكان التوقف" }, 400);
       let km = null, base = null;
-      if (!r.multi && hasXY(r.from) && hasXY(r.to)) { km = await legsKm([r.from, ...(r.stops || []), s, r.to]); base = Math.max(pr.minFare, up5(km * pr.perKm)); }
+      if (!r.multi && hasXY(r.from) && (repl || hasXY(r.to))) { km = await legsKm(repl ? [r.from, ...(r.stops || []), s] : [r.from, ...(r.stops || []), s, r.to]); base = Math.max(pr.minFare, up5(km * pr.perKm)); }
       const total = base != null ? base + (r.penalty || 0) + (r.farExtra || 0) : null;
-      await putDoc(env, "requests", r.id, { ...r, stopReq: { ...s, km, base, fare: total, at: Date.now() }, stopNo: null });
+      await putDoc(env, "requests", r.id, { ...r, stopReq: { ...s, km, base, fare: total, at: Date.now(), replace: repl }, stopNo: null });
       const d = await getDoc(env, "drivers", r.driverId);
-      if (d) try { await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: "الراكب عايز يضيف توقف", body: s.label + (total != null ? " · الأجرة الجديدة " + total + " ج" : ""), url: "/driver.html", tag: "stop-" + r.id }); } catch (e) {}
+      if (d) try { await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: repl ? "الراكب عايز يغيّر الوجهة" : "الراكب عايز يضيف توقف", body: s.label + (total != null ? " · الأجرة الجديدة " + total + " ج" : ""), url: "/driver.html", tag: "stop-" + r.id }); } catch (e) {}
       return json({ ok: true, km, fare: total });
+    }
+
+    /* رد الراكب على «الراكب عايز يكمّل» */
+    if (route === "extend-answer" && method === "POST") {
+      const b = await parseBody(request);
+      const r = await getDoc(env, "requests", str(b.id, 40));
+      if (!r || !tokOk(b.token, r.token)) return json({ error: "غير مصرّح" }, 401);
+      if (r.status !== "assigned" || extState(r) !== "ask") return json({ error: "الطلب ده خلص" }, 409);
+      const d = r.driverId ? await getDoc(env, "drivers", r.driverId) : null, now = Date.now();
+      if (b.ok === true) {
+        r.ext = { ...r.ext, state: "on", at: now, km: 0 };
+        r.meter = { ...(r.meter || { km: 0 }), last: d && d.loc ? { lat: d.loc.lat, lng: d.loc.lng, at: now } : null };
+        r.waits = r.waits || [];
+        if (d) { d.meterId = r.id; await putDoc(env, "drivers", d.id, d); }
+      } else r.ext = { ...r.ext, state: "no", at: now };
+      await putDoc(env, "requests", r.id, r);
+      const perKm = PR(await pricingCfg(env)).perKm;
+      if (d) try { await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: b.ok === true ? "الراكب وافق — العداد شغّال ✓" : "الراكب هينزل هنا", body: b.ok === true ? "كل كيلو بـ " + perKm + " ج · أقصى تكملة " + EXT_MAX_KM + " كم" : "كمّل لحد الوجهة ودوس «وصلنا»", url: "/driver.html", tag: "ext-" + r.id }); } catch (e) {}
+      return json({ ok: true, state: r.ext.state });
     }
 
     /* كود الركوب اختياري: الراكب بيفعّله بنفسه لحد ما الرحلة تبدأ، وبعدها السائق لازم يكتبه */
@@ -1761,6 +1955,29 @@ export async function onRequest({ request, env, params }) {
         const b = await parseBody(request);
         const lat = +b.lat, lng = +b.lng;
         if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return json({ error: "مكان غير صحيح" }, 400);
+        /* النقط اللي اتسجّلت والنت فاصل (التطبيق الأصلي) ← بتتضاف لعدّاد المشوار بالترتيب، فالمسافة بتبقى الحقيقية مش خط مستقيم */
+        if (Array.isArray(b.back) && b.back.length && me.meterId) {
+          try {
+            const r = await getDoc(env, "requests", me.meterId);
+            if (r && r.status === "assigned" && r.startedAt && metered(r)) {
+              const m = r.meter || { km: 0 };
+              let prev = m.last, add = 0;
+              for (const q of b.back.slice(-900)) {
+                const p = { lat: +q.lat, lng: +q.lng };
+                if (!isFinite(p.lat) || !isFinite(p.lng)) continue;
+                if (prev) { const d = meters(prev, p); if (d < 400) add += d; }
+                prev = p;
+              }
+              if (prev && add > 0) {
+                const km = add / 1000;
+                m.km = +((+m.km || 0) + km).toFixed(3);
+                m.last = { lat: prev.lat, lng: prev.lng, at: Date.now() - 500 }; m.moveAt = Date.now();
+                if (extState(r) === "on") { r.ext.km = +Math.min(EXT_MAX_KM, (+r.ext.km || 0) + km).toFixed(3); if (r.ext.km >= EXT_MAX_KM) r.ext.state = "cap"; }
+                r.meter = m; await putDoc(env, "requests", r.id, r);
+              }
+            }
+          } catch (e) {}
+        }
         /* أقل من ٤ ثواني بنتجاهل — إلا لو ده أول اتجاه يوصل (علشان التوكتوك يلف على طول عند الراكب) */
         /* وهو في مشوار: كل ثانيتين (التوكتوك لايف عند الراكب والأهل) · وهو فاضي: كل ٤ ثواني بالكتير */
         if (me.loc && Date.now() - me.loc.at < (b.idle ? 4000 : 1500) && !(me.loc.h == null && b.h != null && isFinite(+b.h))) return json({ ok: true });
@@ -1769,8 +1986,9 @@ export async function onRequest({ request, env, params }) {
         if (me.meterId) {
           try {
             const r = await getDoc(env, "requests", me.meterId);
-            if (!r || r.status !== "assigned" || !(r.multi || hasStops(r))) me.meterId = null;
+            if (!r || r.status !== "assigned" || !metered(r)) me.meterId = null;
             else if (r.startedAt) {
+              let capHit = false;
               const m = r.meter || { km: 0 }, p = { lat: me.loc.lat, lng: me.loc.lng, at: me.loc.at };
               if (!m.last) m.last = p;
               else {
@@ -1779,11 +1997,13 @@ export async function onRequest({ request, env, params }) {
                   let km = d / 1000;
                   if (gap > 15000 && d > 150) { const rk = await roadKm(m.last, p); km = rk != null ? rk : km * 1.3; m.weakAt = p.at; }
                   m.km = +((+m.km || 0) + km).toFixed(3); m.last = p; m.moveAt = p.at;
+                  if (extState(r) === "on") { r.ext.km = +Math.min(EXT_MAX_KM, (+r.ext.km || 0) + km).toFixed(3); if (r.ext.km >= EXT_MAX_KM) { r.ext.state = "cap"; capHit = true; } }
                   /* التوكتوك اتحرك أكتر من ٥٠ م من مكان الوقفة ← الانتظار بيقف لوحده */
                   if (r.waitOn && r.waitOn.lat != null && meters(r.waitOn, p) > 50) { r.waits = [...(r.waits || []), { s: r.waitOn.s, e: p.at, auto: true }]; r.waitOn = null; }
                 } else m.last = { ...m.last, at: p.at };
               }
               r.meter = m; await putDoc(env, "requests", r.id, r);
+              if (capHit) try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: "وصلت لحد التكملة (" + EXT_MAX_KM + " كم)", body: "لو عايز تكمّل أبعد، اطلب مشوار جديد بعد ما تنزل", url: "/", tag: "ext-" + r.id }); } catch (e) {}
             }
           } catch (e) {}
         }
@@ -1811,6 +2031,12 @@ export async function onRequest({ request, env, params }) {
               }
               if (ch) await putDoc(env, "requests", r.id, r);
               await anomEscalate(env, r);
+              /* مكان موبايل الراكب وقف يتبعت أثناء الرحلة (مثلاً قفل التطبيق خالص على الآيفون) ← إشعار للراكب (مرة كل ١٠ دقايق) */
+              if (r.startedAt && r.riderLive && Date.now() - r.riderLive.at > 60e3 && (!r.staleAsk || Date.now() - r.staleAsk > 10 * 60e3)) {
+                r.staleAsk = Date.now();
+                await putDoc(env, "requests", r.id, r);
+                try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: "افتح المحطة", body: "مكانك وقف يتبعت — افتح التطبيق علشان أهلك يفضلوا شايفينك لحد ما توصل", url: "/", tag: "stale-" + r.id }); } catch (e) {}
+              }
             }
           } catch (e) {}
         }
@@ -1842,6 +2068,14 @@ export async function onRequest({ request, env, params }) {
         const r = await getDoc(env, "requests", str(b.requestId, 40));
         if (!r || r.driverId !== me.id || r.status === "assigned") return json({ error: "بيتعمل بعد المشوار" }, 409);
         me.blockR = [...new Set([...(me.blockR || []), riderKey(r.bookerPhone || r.riderPhone)])].slice(-50);
+        /* آيفون: تحديث كارت الرحلة على شاشة قفل الراكب */
+        if (me.laRid) {
+          try {
+            const lr = await getDoc(env, "requests", me.laRid);
+            if (!lr || lr.driverId !== me.id || lr.status !== "assigned") { if (lr && lr.la && !lr.la.ended) { lr.la.ended = true; await laPush(env, lr, me, true); } me.laRid = null; }
+            else await laPush(env, lr, me, false);
+          } catch (e) {}
+        }
         await putDoc(env, "drivers", me.id, me);
         return json({ ok: true });
       }
@@ -1856,7 +2090,7 @@ export async function onRequest({ request, env, params }) {
       if (sub === "wait" && method === "POST") {
         const b = await parseBody(request);
         const r = await getDoc(env, "requests", str(b.requestId, 40));
-        if (!r || r.driverId !== me.id || r.status !== "assigned" || !r.startedAt || !(r.multi || hasStops(r))) return json({ error: "مفيش مشوار فيه توقفات شغال" }, 409);
+        if (!r || r.driverId !== me.id || r.status !== "assigned" || !r.startedAt || !metered(r)) return json({ error: "مفيش مشوار بالعداد شغال" }, 409);
         const now = Date.now();
         if (b.on) {
           if (!r.waitOn) {
@@ -1865,7 +2099,21 @@ export async function onRequest({ request, env, params }) {
           }
         } else if (r.waitOn) { r.waits = [...(r.waits || []), { s: r.waitOn.s, e: now }]; r.waitOn = null; }
         await putDoc(env, "requests", r.id, r);
-        return json({ ok: true, meter: meterView(r.multi ? r : { ...r, meter: { km: r.distKm || 0 } }, PR(await pricingCfg(env)), now) });
+        return json({ ok: true, meter: meterView(kmOf(r), PR(await pricingCfg(env)), now) });
+      }
+
+      /* «الراكب عايز يكمّل»: السائق بيطلب، والراكب يوافق من موبايله (مرة واحدة في الرحلة) */
+      if (sub === "extend" && method === "POST") {
+        const b = await parseBody(request);
+        const r = await getDoc(env, "requests", str(b.requestId, 40));
+        if (!r || r.driverId !== me.id || r.status !== "assigned" || !r.startedAt) return json({ error: "مفيش رحلة شغالة" }, 409);
+        if (r.multi) return json({ error: "المشوار المتعدد بالعداد أصلاً" }, 409);
+        if (r.ext) return json({ error: extState(r) === "ask" ? "مستنيين رد الراكب" : "اتطلبت مرة قبل كده في الرحلة دي" }, 409);
+        const pr = PR(await pricingCfg(env));
+        r.ext = { state: "ask", askAt: Date.now(), km: 0 };
+        await putDoc(env, "requests", r.id, r);
+        try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: "عايز تكمّل بعد " + ((r.to && r.to.label) || "الوجهة") + "؟", body: "الأجرة لحد هنا " + r.fare + " ج، وكل كيلو زيادة بـ " + pr.perKm + " ج — رد من التطبيق", url: "/", tag: "ext-" + r.id }); } catch (e) {}
+        return json({ ok: true });
       }
 
       /* رد السائق على توقف إضافي طلبه الراكب */
@@ -1875,7 +2123,8 @@ export async function onRequest({ request, env, params }) {
         if (!r || r.driverId !== me.id || r.status !== "assigned" || !r.stopReq) return json({ error: "مفيش طلب توقف" }, 409);
         const q = r.stopReq;
         if (b.ok) {
-          r.stops = [...(r.stops || []), { lat: q.lat, lng: q.lng, label: q.label }];
+          if (q.replace) r.to = { lat: q.lat, lng: q.lng, label: q.label };
+          else r.stops = [...(r.stops || []), { lat: q.lat, lng: q.lng, label: q.label }];
           if (q.km != null) { r.distKm = q.km; r.baseFare = q.base; r.fare = q.base + (r.penalty || 0) + (r.farExtra || 0); }
           if (!r.meter) r.meter = { km: 0, last: me.loc ? { lat: me.loc.lat, lng: me.loc.lng, at: Date.now() } : null };
           r.waits = r.waits || []; r.stopReq = null;
@@ -1888,7 +2137,7 @@ export async function onRequest({ request, env, params }) {
           } catch (e) {}
         } else { r.stopReq = null; r.stopNo = Date.now(); }
         await putDoc(env, "requests", r.id, r);
-        try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: b.ok ? "السائق وافق على التوقف ✓" : "السائق ماوافقش على التوقف", body: b.ok ? q.label + (q.fare != null ? " · الأجرة " + r.fare + " ج" : "") : "كلّمه من التطبيق لو محتاج", url: "/", tag: "ride-" + r.id }); } catch (e) {}
+        try { await pushTo(env, "rider", l10(r.bookerPhone || r.riderPhone), { kind: "ride", title: b.ok ? (q.replace ? "السائق وافق على الوجهة الجديدة ✓" : "السائق وافق على التوقف ✓") : (q.replace ? "السائق ماوافقش على الوجهة الجديدة" : "السائق ماوافقش على التوقف"), body: b.ok ? q.label + (q.fare != null ? " · الأجرة " + r.fare + " ج" : "") : "كلّمه من التطبيق لو محتاج", url: "/", tag: "ride-" + r.id }); } catch (e) {}
         return json({ ok: true, fare: r.fare, stops: r.stops.length });
       }
 
@@ -1947,7 +2196,8 @@ export async function onRequest({ request, env, params }) {
         if (mine && mine.riderLoc && (mine.startedAt || Date.now() - mine.riderLoc.at > 60e3)) delete mine.riderLoc;
         if (mine) { delete mine.anom; delete mine.anomMute; delete mine.still; delete mine.anomChk; }
         const prF = PR(await pricingCfg(env));
-        if (mine && (mine.multi || hasStops(mine)) && mine.startedAt) mine.meterV = meterView(mine.multi ? mineFull : { ...mineFull, meter: { km: mineFull.distKm || 0 } }, prF, Date.now());
+        if (mine && metered(mineFull) && mine.startedAt) mine.meterV = meterView(kmOf(mineFull), prF, Date.now());
+        if (mine) mine.ext = extView(mineFull);
 
         const blocked = ss.state === "stopped";
         const zones = Array.isArray(me.zones) ? me.zones : [];
@@ -2002,7 +2252,7 @@ export async function onRequest({ request, env, params }) {
         }
         const done = requests.filter((r) => r.driverId === me.id && r.status === "done" && r.day === todayStr());
         return json({
-          me: { id: me.id, name: me.name, plate: me.plate, online: me.online !== false, zones, heading, chain: Boolean(me.chain), ...tierOf(me) },
+          me: { id: me.id, name: me.name, plate: me.plate, online: me.online !== false, zones, heading, chain: Boolean(me.chain), ...tierOf(me), points: me.points || 0, ptsLog: me.ptsLog || [] },
           sub: ss, pricing: { farFromKm: prF.farFromKm, farBase: prF.farBase, farPerKm: prF.farPerKm, farMaxKm: prF.farMaxKm, nextRadiusM: prF.nextRadiusM, nextStartKm: prF.nextStartKm },
           chainAvail, next: nextR ? { ...teaser(nextR), stopDelay: Boolean(nextR.stopDelay) } : null,
           available: blocked ? [] : available, mine, hidden, noReply, cancelled,
@@ -2195,10 +2445,11 @@ export async function onRequest({ request, env, params }) {
           ? { ...r, ...fareReset(r), status: "pending", driverId: "", assignedAt: null, startedAt: null, arrivedAt: null, offers: [], reopenedAt: Date.now(), skipDrivers: [...(r.skipDrivers || []), me.id].slice(-5) }
           : { ...r, status: "done", finishedAt: Date.now(), day: todayStr(), stopReq: null };
         /* المشوار المتعدد: الأجرة النهائية من العدّاد · المشوار اللي اتضافله توقفات: المسافة الجديدة + الانتظار. وفوقهم زيادة البُعد والغرامة */
-        if (next.status === "done" && (r.multi || hasStops(r))) {
+        if (next.status === "done" && metered(r)) {
           const nw = Date.now();
           if (next.waitOn) { next.waits = [...(next.waits || []), { s: next.waitOn.s, e: nw }]; next.waitOn = null; }
-          const mv = meterView(r.multi ? next : { ...next, meter: { km: next.distKm || 0 } }, PR(await pricingCfg(env)), nw); delete mv.waitOn; delete mv.weak;
+          const mv = meterView(kmOf(next), PR(await pricingCfg(env)), nw); delete mv.waitOn; delete mv.weak;
+          if (extUsed(next)) { mv.extKm = +(+next.ext.km || 0).toFixed(2); mv.origKm = next.distKm || 0; }
           mv.farExtra = r.farExtra || 0; mv.farKm = r.farKm || 0; mv.penalty = r.penalty || 0; mv.total = mv.final + mv.farExtra + mv.penalty;
           next.bill = mv; next.fare = mv.total;
         }
@@ -2245,6 +2496,10 @@ export async function onRequest({ request, env, params }) {
           }
         }
         await putDoc(env, "requests", rid, next);
+        /* «نقاطي»: ١٠ نقاط للراكب وللسائق على كل رحلة خلصت فعلاً (مرة واحدة لكل رحلة) */
+        if (next.status === "done" && r.status !== "done") {
+          try { await addPoints(env, "riders", riderKey(r.bookerPhone || r.riderPhone), PTS_RIDE, r); await addPoints(env, "drivers", me.id, PTS_RIDE, r); } catch (e) {}
+        }
         if (next.status === "done") { try { await pushFam(env, r.bookerPhone || r.riderPhone, { type: "done", requestId: r.id, to: r.to && r.to.label }, true); } catch (e) {} }
         /* الطلب التالي المحجوز له: بيتحوّل له على طول، ويبدأ «في الطريق للراكب» */
         let nextId = null;
@@ -2399,7 +2654,8 @@ export async function onRequest({ request, env, params }) {
       const now = Date.now();
       await env.DB.batch([
         env.DB.prepare("DELETE FROM docs WHERE kind IN ('requests','chat','reports','famalerts','repeats','rated','reqkey','rl')"),
-        env.DB.prepare("UPDATE docs SET data=json_remove(json_set(data,'$.ratingSum',0,'$.ratingCount',0,'$.rideCount',0,'$.releaseCount',0,'$.tagRated',0),'$.lastConfirmedReport','$.tagCount','$.redBy','$.redAlert','$.reviews'), updated=? WHERE kind='drivers'").bind(now),
+        env.DB.prepare("UPDATE docs SET data=json_remove(json_set(data,'$.ratingSum',0,'$.ratingCount',0,'$.rideCount',0,'$.releaseCount',0,'$.tagRated',0,'$.points',0),'$.lastConfirmedReport','$.tagCount','$.redBy','$.redAlert','$.reviews','$.ptsLog'), updated=? WHERE kind='drivers'").bind(now),
+        env.DB.prepare("UPDATE docs SET data=json_remove(json_set(data,'$.points',0),'$.ptsLog'), updated=? WHERE kind='riders'").bind(now),
         ...(cfgR ? [putSt(env, "config", "review", { ...cfgR, isolate: true, isoOffAt: 0, at: now })] : []),
         putSt(env, "config", "trialEnd", { id: "trialEnd", at: now, rides: (cnt && cnt.n) || 0 }),
       ]);
