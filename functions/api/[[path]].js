@@ -721,10 +721,12 @@ async function sendOtp(env, phone, code) {
 const PR = (c) => { c = c || {}; const n = (v, d) => (v === undefined || v === null || v === "" || !isFinite(+v) || +v < 0) ? d : +v;
   return { perKm: n(c.perKm, 8) || 8, minFare: n(c.minFare, 10), freeMin: n(c.freeMin, 3), waitPerMin: n(c.waitPerMin, 1), maxWaitMin: n(c.maxWaitMin, 15) || 15,
     farFromKm: n(c.farFromKm, 2), farBase: n(c.farBase, 10), farPerKm: n(c.farPerKm, 5), farMaxKm: n(c.farMaxKm, 5) || 5,
-    nextRadiusM: n(c.nextRadiusM, 200) || 200, nextStartKm: n(c.nextStartKm, 1) || 1, cancelFee: n(c.cancelFee, 5), cancelFreeN: n(c.cancelFreeN, 3), maxStops: 3 }; };
+    nextRadiusM: n(c.nextRadiusM, 200) || 200, nextStartKm: n(c.nextStartKm, 1) || 1, cancelFee: n(c.cancelFee, 5), cancelFreeN: n(c.cancelFreeN, 3), maxStops: 3, maxTripKm: n(c.maxTripKm, 40) || 40 }; };
 /* زيادة السائق البعيد: أبعد من farFromKm ← farBase ثابتة + farPerKm لكل كيلو بعدها (البُعد مقرّب لأقرب كيلو). أبعد من farMaxKm ← الطلب مايوصلوش. الزيادة كلها للسائق */
 const farOf = (m, pr) => { if (m == null || !isFinite(m) || m <= pr.farFromKm * 1000) return { farKm: 0, farExtra: 0 }; const km = Math.round(m / 1000); return { farKm: km, farExtra: pr.farBase + pr.farPerKm * Math.max(0, km - pr.farFromKm) }; };
 const tooFar = (m, pr) => m != null && isFinite(m) && m > pr.farMaxKm * 1000;
+/* اسم السائق اللي الراكب بيشوفه — سائق مراجعة جوجل بيظهر «سائق تجريبي» */
+const dName = (d) => (d && d.reviewer ? "سائق تجريبي" : name2(d && d.name));
 const hasXY = (p) => p && p.lat != null && p.lng != null && isFinite(+p.lat) && isFinite(+p.lng);
 /* الأجرة الأساسية + زيادة البُعد + غرامة إلغاء سابقة */
 const baseOf = (r) => (r.baseFare != null ? r.baseFare : (r.fare || 0) - (r.farExtra || 0) - (r.penalty || 0));
@@ -898,6 +900,7 @@ async function createRequest(env, b, source) {
     roadKmV = await roadKm(from, to2);
     distKm = roadKmV != null ? Math.round(roadKmV * 10) / 10 : Math.round(meters({ lat: +from.lat, lng: +from.lng }, { lat: +to2.lat, lng: +to2.lng }) * 1.3 / 100) / 10;
     fare = Math.max(pr.minFare, up5(distKm * pr.perKm)); same = distKm <= 2;
+    if (distKm > pr.maxTripKm) return json({ error: "المشوار أطول من " + pr.maxTripKm + " كم — المحطة شغالة في كفر صقر وحواليها بس. اتأكد من مكانك على الخريطة.", code: "too_far" }, 400);
   } else {
     /* مكان من غير إحداثيات: أقل أجرة (التسعير الموحّد بس — مفيش أسعار مناطق) */
     same = true; fare = pr.minFare;
@@ -1165,6 +1168,16 @@ export async function onRequest({ request, env, params }) {
       return json({ token: await newSession(env, o.phone, o.role) });
     }
 
+    /* سعر المشوار قبل الطلب — نفس حساب «اطلب» بالظبط (أقرب طريق، ولو مارديش خط مستقيم × ١٫٣) علشان السعر اللي الراكب يشوفه هو اللي يتحسب */
+    if (route === "fare-quote" && method === "GET") {
+      const q = url.searchParams, num = (v) => (v != null && v !== "" && isFinite(+v) ? +v : null);
+      const a = { lat: num(q.get("alat")), lng: num(q.get("alng")) }, z = { lat: num(q.get("blat")), lng: num(q.get("blng")) };
+      if (!hasXY(a) || !hasXY(z)) return json({ error: "مكان ناقص" }, 400);
+      const pr = PR(await pricingCfg(env)), rk = await roadKm(a, z);
+      const km = rk != null ? Math.round(rk * 10) / 10 : Math.round(meters(a, z) * 1.3 / 100) / 10;
+      return json({ km, fare: Math.max(pr.minFare, up5(km * pr.perKm)), road: rk != null, maxTripKm: pr.maxTripKm });
+    }
+
     if (route === "request" && method === "POST") {
       const b = await parseBody(request);
       const deny = await needSession(request, env, b.forOther && b.bookerPhone ? b.bookerPhone : b.riderPhone, "rider");
@@ -1234,7 +1247,7 @@ export async function onRequest({ request, env, params }) {
         if (picked) Object.assign(r, picked);
         else {
           offers = liveOffers(r, drivers, busySet(requests)).map((x) => ({
-            id: x.d.id, name: (x.d.name || "").trim().split(/\s+/)[0] || "سائق", photo: x.d.photo || "", expiresAt: x.expiresAt,
+            id: x.d.id, name: x.d.reviewer ? "سائق تجريبي" : ((x.d.name || "").trim().split(/\s+/)[0] || "سائق"), photo: x.d.photo || "", expiresAt: x.expiresAt,
             distM: x.distM, etaMin: x.etaMin, ...tierOf(x.d), praise: praiseOf(x.d), chain: x.chain, farExtra: x.farExtra, farKm: x.farKm,
           }));
         }
@@ -1253,7 +1266,7 @@ export async function onRequest({ request, env, params }) {
       if (r.status === "pending" && r.nextDriver) {
         const d = await getDoc(env, "drivers", r.nextDriver);
         if (d) {
-          driver = { name: name2(d.name), plate: d.plate, photo: d.photo || "", phone: d.phone || "", ...tierOf(d) };
+          driver = { name: dName(d), plate: d.plate, photo: d.photo || "", phone: d.phone || "", ...tierOf(d) };
           if (d.loc && Date.now() - d.loc.at < 2 * 60e3) { driverLoc = d.loc; reserved = { etaMin: Math.max(2, Math.round(meters(r.from, d.loc) * 1.3 / 250) + 2), at: r.nextAt || null, delayed: Boolean(r.stopDelay) }; }
           else reserved = { etaMin: null, at: r.nextAt || null, delayed: Boolean(r.stopDelay) };
         }
@@ -1262,7 +1275,7 @@ export async function onRequest({ request, env, params }) {
         const d = await getDoc(env, "drivers", r.driverId);
         if (d) {
           /* رقم السائق بيظهر للراكب حتى بعد الرحلة — لو نسي حاجة في التوكتوك (رقم الراكب مابيظهرش للسائق) */
-          driver = { name: name2(d.name), plate: d.plate, photo: d.photo || "", phone: d.phone || "", ...tierOf(d) };
+          driver = { name: dName(d), plate: d.plate, photo: d.photo || "", phone: d.phone || "", ...tierOf(d) };
           if (r.status === "assigned" && d.loc && Date.now() - d.loc.at < 2 * 60 * 1000) driverLoc = d.loc;
         }
       }
@@ -1316,7 +1329,7 @@ export async function onRequest({ request, env, params }) {
       const d = await getDoc(env, "drivers", str(sub, 40));
       if (!d || !d.shareTok || !tokOk(url.searchParams.get("s"), d.shareTok)) return json({ error: "اللينك ده مش صحيح" }, 404);
       const fresh = d.loc && Date.now() - d.loc.at < 3 * 60e3;
-      return json({ driver: { name: name2(d.name), plate: d.plate || "", photo: d.photo || "" }, online: d.online !== false && fresh, onTrip: Boolean(d.watchId), driverLoc: fresh ? { lat: d.loc.lat, lng: d.loc.lng, h: d.loc.h } : null, at: d.loc ? d.loc.at : null });
+      return json({ driver: { name: dName(d), plate: d.plate || "", photo: d.photo || "" }, online: d.online !== false && fresh, onTrip: Boolean(d.watchId), driverLoc: fresh ? { lat: d.loc.lat, lng: d.loc.lng, h: d.loc.h } : null, at: d.loc ? d.loc.at : null });
     }
 
     /* مشاركة الرحلة من التطبيق الأصلي (خدمة Kotlin): مكان موبايل الراكب طول الرحلة حتى والشاشة مقفولة.
@@ -1392,7 +1405,7 @@ export async function onRequest({ request, env, params }) {
       if (r.driverId) {
         const d = await getDoc(env, "drivers", r.driverId);
         if (d) {
-          driver = { name: name2(d.name), plate: d.plate, photo: d.photo || "", tier: tierOf(d).tier };
+          driver = { name: dName(d), plate: d.plate, photo: d.photo || "", tier: tierOf(d).tier };
           /* مكان التوكتوك لايف للأهل — وقت الرحلة بس */
           /* وفي الاستغاثة: بيفضل ظاهر لحد ما الراكب يقفلها، حتى لو الرحلة خلصت */
           if ((r.status === "assigned" || r.sosOn) && d.loc && Date.now() - d.loc.at < 2 * 60 * 1000) driverLoc = { lat: d.loc.lat, lng: d.loc.lng, h: d.loc.h };
@@ -1870,7 +1883,7 @@ export async function onRequest({ request, env, params }) {
       if (kind === "lost" && r.driverId) {
         const d = await getDoc(env, "drivers", r.driverId);
         if (d) { try { await pushTo(env, "driver", l10(d.phone), { kind: "ride", title: "راكب نسي حاجة في التوكتوك", body: (str(b.note, 80) || "بص في التوكتوك") + " — الراكب هيكلّمك", url: "/driver.html", tag: "lost-" + r.id }); } catch (e) {} }
-        return json({ ok: true, driverPhone: d ? d.phone : "", driverName: d ? name2(d.name) : "" });
+        return json({ ok: true, driverPhone: d ? d.phone : "", driverName: d ? dName(d) : "" });
       }
       return json({ ok: true });
     }
@@ -2941,7 +2954,7 @@ ${JSON.stringify(stats)}`;
     return json({ error: "غير موجود" }, 404);
   } catch (err) {
     const big = err && err.message === "too_large";
-    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v104" });
+    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v105" });
     return json({ error: big ? "حجم البيانات كبير" : "خطأ في الخادم" }, big ? 413 : 500);
   }
 }
