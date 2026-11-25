@@ -1278,7 +1278,7 @@ export async function onRequest({ request, env, params }) {
         arrivedAt: r.arrivedAt || null, cancelReason: r.cancelReason || null,
         shareToken: r.shareToken || null, reported: Boolean(r.reported), impostorReported: Boolean(r.impostorReported),
         canRate: r.status === "done" && r.driverId && !r.rating && riderKey(r.riderPhone).length >= 9
-          ? !(await getDoc(env, "rated", r.driverId + ":" + riderKey(r.riderPhone))) : false,
+          ? (r.review || !(await getDoc(env, "rated", r.driverId + ":" + riderKey(r.riderPhone)))) : false,
         offers, autoPickAt: offers.length ? Math.min(...offers.map((o) => o.expiresAt)) : null, now: Date.now(),
       });
     }
@@ -1490,7 +1490,8 @@ export async function onRequest({ request, env, params }) {
       const rk = riderKey(r.riderPhone);
       if (rk.length < 9) return json({ error: "التقييم محتاج رقم موبايل مسجّل" }, 409);
       const pairId = r.driverId + ":" + rk;
-      if (await getDoc(env, "rated", pairId)) return json({ error: "قيّمت السائق ده قبل كده — التقييم مرة واحدة بس لكل سائق" }, 409);
+      /* حسابات مراجعة جوجل: المراجع لازم يقدر يجرّب التقييم كل مرة */
+      if (!r.review && (await getDoc(env, "rated", pairId))) return json({ error: "قيّمت السائق ده قبل كده — التقييم مرة واحدة بس لكل سائق" }, 409);
       const stars = Math.max(1, Math.min(5, parseInt(b.stars, 10) || 0));
       const note = str(b.note, 200), tags = (Array.isArray(b.tags) ? b.tags : []).map((x) => str(x, 30)).slice(0, 5);
       await putDoc(env, "rated", pairId, { id: pairId, driverId: r.driverId, rider: rk, requestId: r.id, stars, at: Date.now() });
