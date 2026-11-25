@@ -59,6 +59,50 @@ const str = (v, max) => String(v ?? "").trim().slice(0, max);
 const digits = (v) => String(v ?? "").replace(/\D/g, "");
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+/* ===== سجل الأخطاء (v103) — الأخطاء بتتجمّع هنا علشان وكيل المراجعة يشوفها ويحضّر التصليح =====
+   كل خطأ ليه «بصمة» واحدة وعدّاد — نفس الخطأ مايتكررش في السجل. الأرقام الطويلة والتوكنات بتتمسح (مفيش تليفونات ولا أكواد) */
+const scrub = (v, n) => str(v, n).replace(/\d{6,}/g, "#").replace(/[A-Za-z0-9_\-]{32,}/g, "…");
+const ERR_MAX = 500;
+const ERR_RL = new Map();
+async function logErr(env, e) {
+  try {
+    const msg = scrub(e.msg, 300);
+    if (!msg) return;
+    const where = e.where === "server" ? "server" : "client";
+    const src = scrub(e.src, 200).replace(/^https?:\/\/[^/]+/, "");
+    const line = Math.max(0, parseInt(e.line, 10) || 0), col = Math.max(0, parseInt(e.col, 10) || 0);
+    const ver = str(e.ver, 20), now = Date.now();
+    const id = (await sha([where, msg, src, line].join("|"))).slice(0, 24);
+    /* موجود قبل كده: نزوّد العدّاد بس — ولو كان «اتصلّح» ورجع يظهر، يرجع «مفتوح» */
+    const up = await env.DB.prepare(`UPDATE docs SET updated=?, data=json_set(data,'$.count',IFNULL(json_extract(data,'$.count'),0)+1,'$.last',?,'$.ver',COALESCE(NULLIF(?,''),json_extract(data,'$.ver')),
+      '$.status', CASE WHEN json_extract(data,'$.status')='resolved' THEN 'open' ELSE json_extract(data,'$.status') END,
+      '$.reopened', CASE WHEN json_extract(data,'$.status')='resolved' THEN ? ELSE json_extract(data,'$.reopened') END)
+      WHERE kind='errs' AND id=?`).bind(now, now, ver, now, id).run();
+    if (up && up.meta && up.meta.changes) return;
+    const n = await env.DB.prepare("SELECT COUNT(*) AS c FROM docs WHERE kind='errs'").first();
+    if (n && n.c >= ERR_MAX) return;
+    await putDoc(env, "errs", id, {
+      id, where, msg, src, line, col, stack: scrub(e.stack, 1500), page: scrub(e.page, 120),
+      app: str(e.app, 20), ver, ua: str(e.ua, 160), count: 1, first: now, last: now, status: "open",
+    });
+  } catch (x) { /* السجل نفسه مايوقعش الطلب أبداً */ }
+}
+const agentOk = (req, env) => String(env.AGENT_KEY || "").length >= 32 && safeEqual(req.headers.get("x-agent-key"), env.AGENT_KEY);
+async function listErrs(env) {
+  const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind='errs' ORDER BY updated DESC LIMIT 500").all();
+  return (results || []).map((r) => { try { return JSON.parse(r.data); } catch (x) { return null; } }).filter(Boolean)
+    .sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1) || (b.count || 0) - (a.count || 0));
+}
+async function setErr(env, b) {
+  const id = str(b.id, 40), st = ["open", "fixing", "resolved", "ignored"].includes(b.status) ? b.status : "";
+  if (!id || !st) return json({ error: "بيانات ناقصة" }, 400);
+  const e = await getDoc(env, "errs", id);
+  if (!e) return json({ error: "غير موجود" }, 404);
+  e.status = st; e.note = str(b.note, 500); e.statusAt = Date.now();
+  await putDoc(env, "errs", id, e);
+  return json({ ok: true });
+}
+
 function newToken() {
   const a = new Uint8Array(16);
   crypto.getRandomValues(a);
@@ -2548,7 +2592,33 @@ export async function onRequest({ request, env, params }) {
       return json({ ok: true, token: at });
     }
 
+    /* سجل الأخطاء: أي شاشة بتقع بتبعت هنا (من غير أي بيانات شخصية) */
+    if (route === "err" && method === "POST") {
+      const ip = str(request.headers.get("CF-Connecting-IP"), 64), now = Date.now();
+      const r = ERR_RL.get(ip) || { n: 0, t: now };
+      if (now - r.t > 60e3) { r.n = 0; r.t = now; }
+      if (++r.n > 20) return json({ ok: true });
+      ERR_RL.set(ip, r);
+      if (ERR_RL.size > 5000) ERR_RL.clear();
+      const b = await parseBody(request);
+      await logErr(env, { ...b, where: "client" });
+      return json({ ok: true });
+    }
+
+    /* وكيل المراجعة: بيقرا الأخطاء ويعلّم عليها — بمفتاح AGENT_KEY بس (لو مش متحط في Cloudflare المسار ده مقفول) */
+    if (route === "agent-errs") {
+      if (!agentOk(request, env)) return json({ error: "غير مصرّح" }, 401);
+      if (method === "GET") return json({ errs: await listErrs(env) });
+      if (method === "POST") return setErr(env, await parseBody(request));
+    }
+
     if (!(await adminOk(request, env))) return json({ error: "غير مصرّح" }, 401);
+
+    /* الإدارة: سجل الأخطاء */
+    if (route === "admin-errs") {
+      if (method === "GET") return json({ errs: await listErrs(env) });
+      if (method === "POST") return setErr(env, await parseBody(request));
+    }
 
     if (route === "logout" && method === "POST") {
       try { await env.DB.prepare("DELETE FROM docs WHERE kind='adminsess' AND id=?").bind(await sha(request.headers.get("x-admin-token"))).run(); } catch (e) {}
@@ -2866,6 +2936,7 @@ ${JSON.stringify(stats)}`;
     return json({ error: "غير موجود" }, 404);
   } catch (err) {
     const big = err && err.message === "too_large";
+    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v103" });
     return json({ error: big ? "حجم البيانات كبير" : "خطأ في الخادم" }, big ? 413 : 500);
   }
 }
