@@ -1956,7 +1956,11 @@ export async function onRequest({ request, env, params }) {
         const { drivers } = await readDocs(env, ["drivers"]);
         const d = drivers.find((x) => digits(x.phone) === phone);
         if (d) await stampCode(env, d);
-        if (!d || !d.code || !safeEqual(code, String(d.code))) {
+        /* سائق مراجعة جوجل: بيدخل برقمه بس من غير كود — بس طول ما حساب المراجعة شغال ومعزول عن السواقين الحقيقيين */
+        const rvCfg = d && d.reviewer ? await getDoc(env, "config", "review") : null;
+        const rvFree = Boolean(rvCfg && rvCfg.on !== false && rvCfg.isolate !== false && d.active !== false);
+        if (!code && !rvFree) return json({ error: "اكتب الكود اللي خدته من الإدارة" }, 400);
+        if (!d || (!rvFree && (!d.code || !safeEqual(code, String(d.code))))) {
           const l = await drvFail(env, phone);
           return l.until ? json({ error: LOCK_MSG, code: "locked" }, 429) : json({ error: "الرقم أو الكود غير صحيح — فاضل " + (DRV_TRIES - l.n) + " محاولات" }, 401);
         }
@@ -2936,7 +2940,7 @@ ${JSON.stringify(stats)}`;
     return json({ error: "غير موجود" }, 404);
   } catch (err) {
     const big = err && err.message === "too_large";
-    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v103" });
+    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v104" });
     return json({ error: big ? "حجم البيانات كبير" : "خطأ في الخادم" }, big ? 413 : 500);
   }
 }
