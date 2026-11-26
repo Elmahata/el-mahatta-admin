@@ -745,14 +745,112 @@ const hasStops = (r) => Boolean(r && (r.stops || []).length);
 const blockedPair = (r, d) => (r.blockD || []).includes(d.id) || (d.blockR || []).includes(riderKey(r.bookerPhone || r.riderPhone));
 const up5 = (x) => Math.ceil((x - 1e-9) / 5) * 5;
 async function pricingCfg(env) { const { config } = await readDocs(env, ["config"]); return (config || []).find((c) => c.id === "pricing") || {}; }
-/* أقرب طريق على الخريطة بين نقطتين (بالكيلو) — لو الخدمة مارديتش: null والحساب يرجع لخط مستقيم × ١٫٣ */
-async function roadKm(a, b) {
+/* ================= الخرائط: جوجل / Stadia / مجاني — بزرار من الإدارة =================
+   - التوكتوك بيمشي بخطوط سير العربية (ممنوع عكس الاتجاه).
+   - مفيش خط مستقيم في الأجرة: لو كل الخدمات وقعت ← null والطلب بيتوقف.
+   - جوجل: مابنحتفظش بنتايجه غير ١٥ دقيقة (عشان شروطه)، والباقي ٧ أيام. */
+let G_ENV = null;
+const MAP_PROVIDERS = ["google", "stadia", "osm"];
+function decodePoly(str, prec) {
+  const f = Math.pow(10, prec || 5), out = []; let i = 0, lat = 0, lng = 0;
+  while (i < str.length) {
+    for (const k of [0, 1]) {
+      let b, s = 0, r = 0;
+      do { b = str.charCodeAt(i++) - 63; r |= (b & 0x1f) << s; s += 5; } while (b >= 0x20);
+      const d = r & 1 ? ~(r >> 1) : r >> 1;
+      if (k === 0) lat += d; else lng += d;
+    }
+    out.push([+(lat / f).toFixed(6), +(lng / f).toFixed(6)]);
+  }
+  return out;
+}
+const cairoDay = () => new Date(Date.now() + 2 * 3600e3).toISOString().slice(0, 10);
+async function mapsCfg(env) {
+  const c = await pricingCfg(env);
+  const hasG = Boolean(env.GOOGLE_ROUTES_KEY && env.GOOGLE_MAPS_BROWSER_KEY);
+  let p = MAP_PROVIDERS.includes(c.mapProvider) ? c.mapProvider : (hasG ? "google" : "osm");
+  if (p === "google" && !hasG) p = "osm";
+  return { provider: p, hasG, hasS: Boolean(env.STADIA_KEY), gRouteCap: +c.gRouteCap > 0 ? +c.gRouteCap : 800, gLoadCap: +c.gLoadCap > 0 ? +c.gLoadCap : 1500, fallback: c.mapFallback === "stadia" ? "stadia" : "osm" };
+}
+async function usageBump(env, field, n) {
   try {
-    const u = "https://router.project-osrm.org/route/v1/driving/" + (+a.lng) + "," + (+a.lat) + ";" + (+b.lng) + "," + (+b.lat) + "?overview=false";
-    const res = await fetch(u, { signal: AbortSignal.timeout(2500), cf: { cacheTtl: 86400 } });
-    const j = await res.json(); const m = j && j.routes && j.routes[0] && j.routes[0].distance;
-    return m > 0 ? m / 1000 : null;
+    const id = cairoDay(), u = (await getDoc(env, "usage", id)) || { id, day: id };
+    u[field] = (+u[field] || 0) + (n || 1);
+    await putDoc(env, "usage", id, u);
+    return u;
   } catch (e) { return null; }
+}
+async function usageToday(env) { try { return (await getDoc(env, "usage", cairoDay())) || {}; } catch (e) { return {}; } }
+const tuktukMin = (km, sec) => Math.max(2, Math.round(Math.max((sec || 0) / 60 * 1.4, km / 15 * 60)) + 1);
+async function viaGoogle(env, a, b) {
+  const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST", signal: AbortSignal.timeout(4000),
+    headers: { "content-type": "application/json", "X-Goog-Api-Key": env.GOOGLE_ROUTES_KEY, "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline" },
+    body: JSON.stringify({ origin: { location: { latLng: { latitude: +a.lat, longitude: +a.lng } } }, destination: { location: { latLng: { latitude: +b.lat, longitude: +b.lng } } }, travelMode: "DRIVE", routingPreference: "TRAFFIC_UNAWARE", languageCode: "ar", regionCode: "EG" }),
+  });
+  const j = await res.json(); const r = j && j.routes && j.routes[0];
+  if (!r || !(r.distanceMeters >= 0)) throw new Error("google: " + ((j && j.error && j.error.message) || res.status));
+  const km = r.distanceMeters / 1000, sec = parseFloat(r.duration) || 0;
+  return { km, min: tuktukMin(km, sec), coords: r.polyline && r.polyline.encodedPolyline ? decodePoly(r.polyline.encodedPolyline, 5) : [[+a.lat, +a.lng], [+b.lat, +b.lng]] };
+}
+async function viaValhalla(url, a, b) {
+  /* موتوسيكل صغير = بيدخل الشوارع الضيقة زي التوكتوك، وبيلتزم بالاتجاه الواحد */
+  const res = await fetch(url, { method: "POST", signal: AbortSignal.timeout(4000), headers: { "content-type": "application/json" },
+    body: JSON.stringify({ locations: [{ lat: +a.lat, lon: +a.lng }, { lat: +b.lat, lon: +b.lng }], costing: "motor_scooter", units: "kilometers", directions_type: "none" }) });
+  const j = await res.json(); const t = j && j.trip;
+  if (!t || !t.summary) throw new Error("valhalla: " + res.status);
+  const km = t.summary.length, coords = [];
+  (t.legs || []).forEach((l) => decodePoly(l.shape || "", 6).forEach((p) => coords.push(p)));
+  return { km, min: tuktukMin(km, t.summary.time), coords: coords.length > 1 ? coords : [[+a.lat, +a.lng], [+b.lat, +b.lng]] };
+}
+async function viaOsrm(a, b) {
+  const res = await fetch("https://router.project-osrm.org/route/v1/driving/" + (+a.lng) + "," + (+a.lat) + ";" + (+b.lng) + "," + (+b.lat) + "?overview=full&geometries=geojson", { signal: AbortSignal.timeout(3000) });
+  const j = await res.json(); const r = j && j.routes && j.routes[0];
+  if (!r) throw new Error("osrm");
+  const km = r.distance / 1000;
+  return { km, min: tuktukMin(km, r.duration), coords: r.geometry.coordinates.map((p) => [p[1], p[0]]) };
+}
+/* أقرب طريق بالترتيب حسب المزوّد المختار. بيرجّع {km,min,coords,prov} أو null */
+async function routeAB(env, a, b, opt) {
+  if (!env || !hasXY(a) || !hasXY(b)) return null;
+  opt = opt || {};
+  const mc = await mapsCfg(env), r4 = (x) => (+x).toFixed(4);
+  const key = (opt.cheap ? "c:" : "") + mc.provider + ":" + [a.lat, a.lng, b.lat, b.lng].map(r4).join(",");
+  try {
+    const c = await getDoc(env, "rcache", key);
+    if (c && Date.now() - c.at < (c.prov === "google" ? 15 * 60e3 : 7 * 86400e3)) return { ...c, cached: true };
+  } catch (e) {}
+  let chain = [];
+  if (mc.provider === "google") {
+    const u = await usageToday(env);
+    /* جوجل بس لو لسه جوه الحد اليومي، وخريطة جوجل نفسها لسه شغالة (مسار جوجل ماينفعش يترسم على خريطة تانية) */
+    if ((+u.gRoute || 0) < mc.gRouteCap && (+u.gLoad || 0) < mc.gLoadCap && !opt.cheap) chain.push("google");
+    if (mc.hasS) chain.push("stadia");
+    chain.push("valhalla", "osrm");
+  } else if (mc.provider === "stadia") chain = (mc.hasS ? ["stadia"] : []).concat(["valhalla", "osrm"]);
+  else chain = ["valhalla", "osrm"];
+  const straight = meters({ lat: +a.lat, lng: +a.lng }, { lat: +b.lat, lng: +b.lng }) / 1000;
+  for (const p of chain) {
+    try {
+      const r = p === "google" ? await viaGoogle(env, a, b)
+        : p === "stadia" ? await viaValhalla("https://api.stadiamaps.com/route/v1?api_key=" + encodeURIComponent(env.STADIA_KEY), a, b)
+        : p === "valhalla" ? await viaValhalla("https://valhalla1.openstreetmap.de/route", a, b)
+        : await viaOsrm(a, b);
+      await usageBump(env, { google: "gRoute", stadia: "sRoute", valhalla: "vRoute", osrm: "oRoute" }[p]);
+      /* لفّة مش منطقية (أطول من ٣ أضعاف الخط المستقيم وأكتر من ٨ كم) = غالباً نقطة غلط — نجرّب اللي بعده */
+      if (r.km > Math.max(8, straight * 3)) continue;
+      const out = { km: +r.km.toFixed(3), min: r.min, coords: r.coords, prov: p, at: Date.now() };
+      try { await putDoc(env, "rcache", key, out); } catch (e) {}
+      return out;
+    } catch (e) { /* الخدمة دي وقعت — نجرّب اللي بعدها */ }
+  }
+  await usageBump(env, "fail");
+  return null;
+}
+/* المسافة بالكيلو على الشارع — null لو كل الخدمات وقعت */
+async function roadKm(a, b, opt) {
+  const r = await routeAB(G_ENV, a, b, opt);
+  return r ? r.km : null;
 }
 /* «الراكب عايز يكمّل»: تكملة بعد نقطة الإنزال بالعداد — (المسافة الأصلية + الإضافية الفعلية) × سعر الكيلو + الانتظار، مقرّبة لأعلى ٥ */
 const EXT_MAX_KM = 5, EXT_ASK_MS = 60e3;
@@ -898,7 +996,9 @@ async function createRequest(env, b, source) {
   else if (multi) { same = false; fare = pr.minFare; }
   else if (hasXY(from) && hasXY(to2)) {
     roadKmV = await roadKm(from, to2);
-    distKm = roadKmV != null ? Math.round(roadKmV * 10) / 10 : Math.round(meters({ lat: +from.lat, lng: +from.lng }, { lat: +to2.lat, lng: +to2.lng }) * 1.3 / 100) / 10;
+    /* مفيش خط مستقيم: لو مقدرناش نحسب الطريق، الطلب مايتبعتش */
+    if (roadKmV == null) return json({ error: "مش قادرين نحسب الطريق دلوقتي — جرّب تاني بعد دقيقة", code: "no_route" }, 503);
+    distKm = Math.round(roadKmV * 10) / 10;
     fare = Math.max(pr.minFare, up5(distKm * pr.perKm)); same = distKm <= 2;
     if (distKm > pr.maxTripKm) return json({ error: "المشوار أطول من " + pr.maxTripKm + " كم — المحطة شغالة في كفر صقر وحواليها بس. اتأكد من مكانك على الخريطة.", code: "too_far" }, 400);
   } else {
@@ -1048,6 +1148,7 @@ export async function onRequest({ request, env, params }) {
   const method = request.method;
   const url = new URL(request.url);
   if (!env.DB) return json({ error: "قاعدة البيانات غير مربوطة (binding: DB)" }, 500);
+  G_ENV = env;
 
   try {
     /* ================= عام ================= */
@@ -1173,9 +1274,40 @@ export async function onRequest({ request, env, params }) {
       const q = url.searchParams, num = (v) => (v != null && v !== "" && isFinite(+v) ? +v : null);
       const a = { lat: num(q.get("alat")), lng: num(q.get("alng")) }, z = { lat: num(q.get("blat")), lng: num(q.get("blng")) };
       if (!hasXY(a) || !hasXY(z)) return json({ error: "مكان ناقص" }, 400);
-      const pr = PR(await pricingCfg(env)), rk = await roadKm(a, z);
-      const km = rk != null ? Math.round(rk * 10) / 10 : Math.round(meters(a, z) * 1.3 / 100) / 10;
-      return json({ km, fare: Math.max(pr.minFare, up5(km * pr.perKm)), road: rk != null, maxTripKm: pr.maxTripKm });
+      const pr = PR(await pricingCfg(env)), rt = await routeAB(env, a, z);
+      if (!rt) return json({ error: "مش قادرين نحسب الطريق دلوقتي — جرّب تاني بعد دقيقة", code: "no_route", road: false, maxTripKm: pr.maxTripKm }, 503);
+      const km = Math.round(rt.km * 10) / 10;
+      return json({ km, fare: Math.max(pr.minFare, up5(km * pr.perKm)), road: true, min: rt.min, coords: rt.coords, prov: rt.prov, maxTripKm: pr.maxTripKm });
+    }
+
+    /* ---------- الخرائط ---------- */
+    /* إعدادات الخريطة للتطبيق: المزوّد الفعلي + مفتاح جوجل بتاع المتصفح (مقفول على دومين الموقع) */
+    if (route === "maps-config" && method === "GET") {
+      if (Math.random() < 0.02) { try { await env.DB.prepare("DELETE FROM docs WHERE kind='rcache' AND updated < ?").bind(Date.now() - 8 * 86400e3).run(); } catch (e) {} }
+      const mc = await mapsCfg(env); let tiles = mc.provider;
+      if (tiles === "google" && (+(await usageToday(env)).gLoad || 0) >= mc.gLoadCap) tiles = mc.fallback;
+      return json({ provider: tiles, route: mc.provider, gkey: tiles === "google" ? env.GOOGLE_MAPS_BROWSER_KEY : "", stadia: mc.hasS });
+    }
+    /* عدّاد فتح الخريطة (للتكلفة) */
+    if (route === "map-usage" && method === "POST") {
+      const b = await parseBody(request), f = { google: "gLoad", stadia: "sLoad", osm: "oLoad" }[b && b.p];
+      if (f) await usageBump(env, f);
+      if (b && b.fail) await usageBump(env, "gLoadFail");
+      return json({ ok: true });
+    }
+    if (route === "map-usage" && method === "GET") {
+      const { usage } = await readDocs(env, ["usage"]);
+      const mc = await mapsCfg(env);
+      return json({ days: (usage || []).sort((x, y) => (x.id < y.id ? 1 : -1)).slice(0, 62), provider: mc.provider, hasG: mc.hasG, hasS: mc.hasS, gRouteCap: mc.gRouteCap, gLoadCap: mc.gLoadCap });
+    }
+    /* المسار على الطرق للرسم على الخريطة */
+    if (route === "route" && method === "GET") {
+      const q = url.searchParams, num = (v) => (v != null && v !== "" && isFinite(+v) ? +v : null);
+      const a = { lat: num(q.get("alat")), lng: num(q.get("alng")) }, z = { lat: num(q.get("blat")), lng: num(q.get("blng")) };
+      if (!hasXY(a) || !hasXY(z)) return json({ error: "مكان ناقص" }, 400);
+      const rt = await routeAB(env, a, z, { cheap: q.get("cheap") === "1" });
+      if (!rt) return json({ road: false, error: "no_route" }, 503);
+      return json({ road: true, km: rt.km, min: rt.min, coords: rt.coords, prov: rt.prov });
     }
 
     if (route === "request" && method === "POST") {
@@ -2057,7 +2189,7 @@ export async function onRequest({ request, env, params }) {
                 const d = meters(m.last, p), gap = p.at - m.last.at;
                 if (d >= 15) {
                   let km = d / 1000;
-                  if (gap > 15000 && d > 150) { const rk = await roadKm(m.last, p); km = rk != null ? rk : km * 1.3; m.weakAt = p.at; }
+                  if (gap > 15000 && d > 150) { const rk = await roadKm(m.last, p, { cheap: true }); km = rk != null ? rk : km * 1.3; m.weakAt = p.at; }
                   m.km = +((+m.km || 0) + km).toFixed(3); m.last = p; m.moveAt = p.at;
                   if (extState(r) === "on") { r.ext.km = +Math.min(EXT_MAX_KM, (+r.ext.km || 0) + km).toFixed(3); if (r.ext.km >= EXT_MAX_KM) { r.ext.state = "cap"; capHit = true; } }
                   /* التوكتوك اتحرك أكتر من ٥٠ م من مكان الوقفة ← الانتظار بيقف لوحده */
@@ -2954,7 +3086,7 @@ ${JSON.stringify(stats)}`;
     return json({ error: "غير موجود" }, 404);
   } catch (err) {
     const big = err && err.message === "too_large";
-    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v105" });
+    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v106" });
     return json({ error: big ? "حجم البيانات كبير" : "خطأ في الخادم" }, big ? 413 : 500);
   }
 }

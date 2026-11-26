@@ -382,6 +382,20 @@
       <div class="field"><label for="cAdminPhone">رقم الإدارة (بيظهر للركاب في «الدعم»)</label><input id="cAdminPhone" inputmode="tel" placeholder="01xxxxxxxxx"></div>
       <div class="field"><label for="cIosMin">أقل نسخة آيفون مسموحة (اللي أقدم منها لازم يحدّث من App Store)</label><input id="cIosMin" inputmode="decimal" placeholder="مثلاً 1.0.0 — سيبها فاضية لو مش محتاج" dir="ltr"></div>
       <button class="btn btn-ghost" id="saveCfg">حفظ</button>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)" id="mapsCard">
+        <b>الخرائط</b>
+        <p class="hint" style="margin:4px 0 8px">مين اللي بيعرض الخريطة ويحسب المسار والأجرة. التحويل بيوصل للتطبيقات في دقايق من غير تحديث.</p>
+        <div class="field"><label for="mProv">مزوّد الخرائط</label>
+          <select id="mProv"><option value="google">جوجل (الأدق — من رصيد جوجل)</option><option value="stadia">Stadia (أرخص)</option><option value="osm">مجاني (OpenStreetMap — للطوارئ)</option></select></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div class="field" style="flex:1;min-width:140px"><label for="mRouteCap">حد جوجل اليومي — حساب مسار</label><input id="mRouteCap" type="number" min="50" step="50"></div>
+          <div class="field" style="flex:1;min-width:140px"><label for="mLoadCap">حد جوجل اليومي — فتح خريطة</label><input id="mLoadCap" type="number" min="50" step="50"></div>
+        </div>
+        <p class="hint" style="margin:0 0 8px">لو الحد اليومي خلص، التطبيق بيحوّل لوحده للمزوّد الاحتياطي لحد آخر اليوم.</p>
+        <button class="btn btn-primary btn-sm" id="mSave" type="button">حفظ إعدادات الخرائط</button>
+        <p class="hint" id="mKeys" style="margin:8px 0 0"></p>
+        <div id="mUsage" style="margin-top:10px"></div>
+      </div>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
         <b>نسخة احتياطية</b>
         <p class="hint" style="margin:4px 0 8px">نزّل كل البيانات (السواقين، الأماكن، المناطق، الرحلات، البلاغات) في ملف واحد. احفظه على Google Drive مرة كل أسبوع.</p>
@@ -961,6 +975,7 @@
   function renderAll(){
     $("farePill").textContent = prCfg().perKm + " ج/كم";
     renderPrice();
+    if(!renderAll.mapsAt || Date.now() - renderAll.mapsAt > 60000){ renderAll.mapsAt = Date.now(); try{ renderMaps(); }catch(e){} }
     if(document.activeElement !== $("cPaidFrom")) $("cPaidFrom").value = S.cfg.paidFrom || "";
     if(document.activeElement !== $("cWeek")) $("cWeek").value = S.cfg.week;
     if(document.activeElement !== $("cMonth")) $("cMonth").value = S.cfg.month;
@@ -1551,6 +1566,34 @@
       P_IDS.forEach(function(x){ delete $(x[0]).dataset.dirty; });
       btn.disabled = false; btn.textContent = "اتحفظ ✓"; setTimeout(function(){ btn.textContent = "حفظ التسعير"; }, 1600);
     }).catch(function(e){ btn.disabled = false; TT.toast(e.message || "حصلت مشكلة"); });
+  });
+
+  /* ---------- الخرائط: المزوّد + الحدود اليومية + الاستهلاك ---------- */
+  function renderMaps(){
+    var c = S.cfgRaw || {};
+    TT.api("map-usage").then(function(u){
+      if(document.activeElement !== $("mProv") && !$("mProv").dataset.dirty) $("mProv").value = c.mapProvider || u.provider || "google";
+      if(document.activeElement !== $("mRouteCap")) $("mRouteCap").value = u.gRouteCap;
+      if(document.activeElement !== $("mLoadCap")) $("mLoadCap").value = u.gLoadCap;
+      $("mKeys").innerHTML = "مفاتيح جوجل: " + (u.hasG ? '<b style="color:var(--accent-ink)">متحطوطة ✓</b>' : '<b style="color:var(--crit)">ناقصة</b> (GOOGLE_MAPS_BROWSER_KEY و GOOGLE_ROUTES_KEY في Cloudflare)') + " · مفتاح Stadia: " + (u.hasS ? '<b style="color:var(--accent-ink)">متحطوط ✓</b>' : "مش متحطوط (اختياري)") + " · الشغّال دلوقتي: <b>" + ({google:"جوجل",stadia:"Stadia",osm:"مجاني"}[u.provider] || u.provider) + "</b>";
+      var days = u.days || [], m = days.length ? days[0].id.slice(0,7) : "", mon = { gLoad:0, gRoute:0 };
+      days.forEach(function(d){ if(d.id.slice(0,7) === m){ mon.gLoad += +d.gLoad||0; mon.gRoute += +d.gRoute||0; } });
+      /* التكلفة التقريبية بعد المجاني: ١٠ آلاف فتح خريطة و١٠ آلاف مسار ببلاش كل شهر */
+      var cost = Math.max(0, mon.gLoad - 10000) * 7 / 1000 + Math.max(0, mon.gRoute - 10000) * 5 / 1000;
+      $("mUsage").innerHTML = '<div class="hint" style="margin-bottom:6px">الشهر ده: فتح خريطة جوجل <b class="num">' + mon.gLoad + '</b> / ١٠٬٠٠٠ مجاني · مسار جوجل <b class="num">' + mon.gRoute + '</b> / ١٠٬٠٠٠ مجاني · تكلفة تقريبية <b class="num">' + cost.toFixed(1) + '$</b> (من رصيد التجربة)</div>'
+        + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:start;padding:5px">اليوم</th><th style="padding:5px">خريطة جوجل</th><th style="padding:5px">مسار جوجل</th><th style="padding:5px">Stadia</th><th style="padding:5px">مجاني</th><th style="padding:5px">فشل</th></tr></thead><tbody>'
+        + days.slice(0, 14).map(function(d){ return '<tr style="border-top:1px solid var(--line)"><td style="padding:5px" class="num">' + d.id + '</td><td class="num" style="text-align:center">' + (d.gLoad||0) + (d.gLoadFail ? ' <span class="chip c-crit">' + d.gLoadFail + ' فشل</span>' : '') + '</td><td class="num" style="text-align:center">' + (d.gRoute||0) + '</td><td class="num" style="text-align:center">' + ((d.sLoad||0) + (d.sRoute||0)) + '</td><td class="num" style="text-align:center">' + ((d.oLoad||0) + (d.vRoute||0) + (d.oRoute||0)) + '</td><td class="num" style="text-align:center">' + (d.fail||0) + '</td></tr>'; }).join("")
+        + '</tbody></table></div>';
+    }).catch(function(){ $("mUsage").textContent = "مقدرناش نجيب أرقام الاستهلاك"; });
+  }
+  $("mProv").addEventListener("change", function(){ this.dataset.dirty = "1"; });
+  $("mSave").addEventListener("click", function(){
+    var p = $("mProv").value, rc = parseInt($("mRouteCap").value, 10), lc = parseInt($("mLoadCap").value, 10);
+    if(!confirm("هتحوّل الخرائط لـ «" + $("mProv").options[$("mProv").selectedIndex].text + "»؟\nالتطبيقات هتتحوّل خلال دقايق.")) return;
+    var btn = this; btn.disabled = true;
+    save("config", "pricing", Object.assign(clone(S.cfgRaw || {}), { id:"pricing", mapProvider: p, gRouteCap: rc > 0 ? rc : 800, gLoadCap: lc > 0 ? lc : 1500 })).then(function(){
+      delete $("mProv").dataset.dirty; btn.disabled = false; btn.textContent = "اتحفظ ✓"; setTimeout(function(){ btn.textContent = "حفظ إعدادات الخرائط"; }, 1600); renderMaps();
+    }).catch(function(){ btn.disabled = false; });
   });
 
   $("saveCfg").addEventListener("click", function(){
