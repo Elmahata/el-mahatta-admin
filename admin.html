@@ -953,6 +953,8 @@
         + '<div class="leg">الراكب: '+TT.esc(r.riderName||"—")+' · <span class="num">'+TT.esc(r.riderPhone||"")+'</span></div>'
         + '<div class="leg">السائق: '+TT.esc(d?d.name:"—")+(d?' · لوحة '+TT.esc(d.plate||""):"")+(sameDrv>1?' <span class="chip c-crit">'+sameDrv+' بلاغات سعر</span>':'')+'</div>'
         + (r.note ? '<div class="leg" style="color:var(--ink)">«'+TT.esc(r.note)+'»</div>' : '')
+        + (r.aiReply ? '<div class="leg" style="background:var(--accent-soft,#e6f2ef);border-radius:10px;padding:6px 10px">🤖 اترد تلقائياً: '+TT.esc(r.aiReply)+'</div>' : '')
+        + (r.unverified ? '<div class="leg">⚠️ رقم مش متأكد منه</div>' : '')
         + '<div class="actions">'
         + '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(r.riderPhone)+'">اتصل بالراكب</a>'
         + (d ? '<a class="btn btn-ghost btn-sm" href="tel:'+TT.esc(d.phone)+'">اتصل بالسائق</a>' : '')
