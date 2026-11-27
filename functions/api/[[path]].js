@@ -88,6 +88,93 @@ async function logErr(env, e) {
   } catch (x) { /* السجل نفسه مايوقعش الطلب أبداً */ }
 }
 const agentOk = (req, env) => String(env.AGENT_KEY || "").length >= 32 && safeEqual(req.headers.get("x-agent-key"), env.AGENT_KEY);
+
+/* ================= الحارس اللحظي (v107) =================
+   بيعدّ الأحداث المشبوهة في الدقيقة، ولو عدّت حد معيّن بيتصرف تصرف مؤقت (يقفل IP ساعة / يقفل دخول الأدمن ساعة)
+   ويبعت تنبيه فوري على تيليجرام (TG_BOT_TOKEN + TG_CHAT_ID). كل التصرفات بترجع لوحدها. */
+const ADMIN_HOST_RE = /(^|\.)el-mahatta-admin\.pages\.dev$|^localhost$|^127\.0\.0\.1$/;
+const adminHost = (h, env) => ADMIN_HOST_RE.test(h) || String(env.ADMIN_HOSTS || "").split(",").map((x) => x.trim()).filter(Boolean).includes(h);
+const ipOf = (req) => str(req.headers.get("cf-connecting-ip") || "x", 64).replace(/[^\w.:-]/g, "");
+const BLOCK_CACHE = new Map();
+async function ipBlocked(env, ip) {
+  const c = BLOCK_CACHE.get(ip), now = Date.now();
+  if (c && now - c.t < 30e3) return c.exp > now;
+  let exp = 0;
+  try { const b = await getDoc(env, "ipblock", ip); exp = b ? +b.exp || 0 : 0; } catch (e) {}
+  BLOCK_CACHE.set(ip, { t: now, exp }); if (BLOCK_CACHE.size > 5000) BLOCK_CACHE.clear();
+  return exp > now;
+}
+async function blockIp(env, ip, why, mins) {
+  if (!ip || ip === "x") return;
+  const exp = Date.now() + (mins || 60) * 6e4;
+  await putDoc(env, "ipblock", ip, { id: ip, why, at: Date.now(), exp });
+  BLOCK_CACHE.set(ip, { t: Date.now(), exp });
+}
+/* عدّاد في نافذة متحركة بالدقايق: بيرجّع العدد في آخر win دقيقة */
+async function secCount(env, key, win) {
+  const m = Math.floor(Date.now() / 6e4), id = key + ":" + m;
+  await env.DB.prepare("INSERT INTO docs (kind,id,data,updated) VALUES ('sec',?,'1',?) ON CONFLICT(kind,id) DO UPDATE SET data=CAST(data AS INTEGER)+1, updated=excluded.updated").bind(id, Date.now()).run();
+  const ids = []; for (let i = 0; i < (win || 1); i++) ids.push(key + ":" + (m - i));
+  const { results } = await env.DB.prepare(`SELECT data FROM docs WHERE kind='sec' AND id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all();
+  if (Math.random() < 0.01) { try { await env.DB.prepare("DELETE FROM docs WHERE kind IN ('sec','ipblock','alert') AND updated<?").bind(Date.now() - 3 * 864e5).run(); } catch (e) {} }
+  return (results || []).reduce((t, r) => t + (+r.data || 0), 0);
+}
+/* سجل أحداث الأمان (آخر ٧ أيام) — بيقراه وكلاء المتابعة */
+async function secLog(env, type, data) {
+  try { const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); await putDoc(env, "seclog", id, { id, type, at: Date.now(), ...data }); } catch (e) {}
+}
+/* تنبيه تيليجرام — نفس التنبيه مايتكررش أكتر من مرة كل dedupMin دقيقة */
+async function tgAlert(env, key, text, dedupMin) {
+  try {
+    if (!env.TG_BOT_TOKEN || !env.TG_CHAT_ID) return false;
+    if (key) {
+      const a = await getDoc(env, "alert", key);
+      if (a && Date.now() - a.at < (dedupMin || 15) * 6e4) { a.n = (a.n || 1) + 1; await putDoc(env, "alert", key, a); return false; }
+      await putDoc(env, "alert", key, { id: key, at: Date.now(), n: 1, text: str(text, 300) });
+    }
+    const r = await fetch("https://api.telegram.org/bot" + env.TG_BOT_TOKEN + "/sendMessage", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: str(text, 3500), disable_web_page_preview: true }),
+    });
+    return r.ok;
+  } catch (e) { return false; }
+}
+/* الحدث + القرار */
+async function guardHit(env, type, ip, extra) {
+  try {
+    const R = {
+      adminfail:  { win: 15, ip: 5,  all: 20, sev: "🔴", t: "محاولات دخول غلط على الأدمن" },
+      drvfail:    { win: 15, ip: 15, all: 40, sev: "🟡", t: "محاولات دخول غلط على حسابات السواقين" },
+      ratelimit:  { win: 10, ip: 60, all: 0,  sev: "🟡", t: "جهاز بيبعت طلبات كتير جداً" },
+      servererr:  { win: 10, ip: 0,  all: 10, sev: "🔴", t: "أخطاء كتير في السيرفر" },
+      clienterr:  { win: 10, ip: 0,  all: 40, sev: "🟡", t: "أخطاء كتير في التطبيقات" },
+    }[type];
+    if (!R) return;
+    const nIp = R.ip && ip ? await secCount(env, type + ":" + ip, R.win) : 0;
+    const nAll = R.all ? await secCount(env, type + ":all", R.win) : 0;
+    if (R.ip && nIp >= R.ip) {
+      await blockIp(env, ip, type, 60);
+      await secLog(env, "block", { why: type, ip, n: nIp, ...(extra || {}) });
+      await tgAlert(env, "blk:" + type + ":" + ip, R.sev + " المحطة — " + R.t + "\nجهاز (IP " + ip + ") عمل " + nIp + " مرة في " + R.win + " دقيقة.\n✅ اتقفل تلقائياً لمدة ساعة.", 60);
+    }
+    if (R.all && nAll >= R.all) {
+      if (type === "adminfail") {
+        await putDoc(env, "guard", "adminlock", { id: "adminlock", exp: Date.now() + 36e5, at: Date.now(), why: "هجوم على دخول الأدمن" });
+        await secLog(env, "adminlock", { n: nAll });
+      } else await secLog(env, "spike", { why: type, n: nAll, ...(extra || {}) });
+      await tgAlert(env, "all:" + type, R.sev + " المحطة — " + R.t + "\n" + nAll + " مرة في آخر " + R.win + " دقيقة." + (type === "adminfail" ? "\n✅ دخول الأدمن اتقفل تلقائياً لمدة ساعة (الجلسات المفتوحة شغالة عادي)." : "") + (extra && extra.msg ? "\nآخر خطأ: " + str(extra.msg, 200) : ""), 30);
+    }
+  } catch (e) {}
+}
+async function adminLocked(env) { try { const g = await getDoc(env, "guard", "adminlock"); return Boolean(g && g.exp > Date.now()); } catch (e) { return false; } }
+/* سجل عمليات الإدارة: مين عمل إيه وإمتى (من غير بيانات حساسة) */
+async function audit(env, request, route, sub, third) {
+  try {
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    await putDoc(env, "audit", id, { id, at: Date.now(), method: request.method, route: str(route, 40), kind: str(sub, 40), target: str(third, 60), ip: ipOf(request), ua: str(request.headers.get("user-agent"), 120) });
+    if (Math.random() < 0.02) await env.DB.prepare("DELETE FROM docs WHERE kind IN ('audit','seclog') AND updated<?").bind(Date.now() - 90 * 864e5).run();
+  } catch (e) {}
+}
 async function listErrs(env) {
   const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind='errs' ORDER BY updated DESC LIMIT 500").all();
   return (results || []).map((r) => { try { return JSON.parse(r.data); } catch (x) { return null; } }).filter(Boolean)
@@ -1142,7 +1229,63 @@ async function wipeRider(env, phone, mineR) {
   return { cleared: mineR.length };
 }
 
-export async function onRequest({ request, env, params }) {
+async function guardApi(request, env, url) {
+  const rows = async (kind, since, lim) => {
+    const { results } = await env.DB.prepare("SELECT data FROM docs WHERE kind=? AND updated>=? ORDER BY updated DESC LIMIT ?").bind(kind, since, lim || 200).all();
+    return (results || []).map((r) => { try { return JSON.parse(r.data); } catch (e) { return null; } }).filter(Boolean);
+  };
+  if (request.method === "GET") {
+    const h = Math.min(168, Math.max(1, +url.searchParams.get("hours") || 24)), since = Date.now() - h * 36e5;
+    const errs = (await listErrs(env)).filter((e) => e.status === "open" || (e.last || 0) >= since).slice(0, 60)
+      .map((e) => ({ id: e.id, where: e.where, msg: e.msg, src: e.src, line: e.line, page: e.page, app: e.app, ver: e.ver, count: e.count, first: e.first, last: e.last, status: e.status }));
+    const blocks = (await rows("ipblock", since, 100)).filter((b) => b.exp > Date.now());
+    const lock = await getDoc(env, "guard", "adminlock");
+    return json({ at: Date.now(), hours: h, tg: Boolean(env.TG_BOT_TOKEN && env.TG_CHAT_ID), ver: "v107",
+      seclog: await rows("seclog", since, 300), audit: await rows("audit", since, 300), alerts: await rows("alert", since, 100),
+      blocks, adminLock: lock && lock.exp > Date.now() ? lock : null, errs,
+      usage: (await rows("usage", Date.now() - 3 * 864e5, 3)) });
+  }
+  if (request.method === "POST") {
+    const b = await parseBody(request), a = str(b.action, 30);
+    if (a === "unblock") { const ip = str(b.ip, 64); await env.DB.prepare("DELETE FROM docs WHERE kind='ipblock' AND id=?").bind(ip).run(); BLOCK_CACHE.delete(ip); await secLog(env, "unblock", { ip, by: str(b.by, 20) }); return json({ ok: true }); }
+    if (a === "block") { const ip = str(b.ip, 64), m = Math.min(24 * 60, Math.max(5, +b.mins || 60)); await blockIp(env, ip, str(b.why, 80) || "manual", m); await secLog(env, "block", { ip, why: str(b.why, 80), mins: m, by: str(b.by, 20) }); return json({ ok: true }); }
+    if (a === "unlock-admin") { await env.DB.prepare("DELETE FROM docs WHERE kind='guard' AND id='adminlock'").run(); await secLog(env, "adminunlock", { by: str(b.by, 20) }); return json({ ok: true }); }
+    if (a === "alert") { const ok = await tgAlert(env, b.key ? "ag:" + str(b.key, 60) : "", str(b.text, 3500), +b.dedupMin || 15); return json({ ok, tg: Boolean(env.TG_BOT_TOKEN && env.TG_CHAT_ID) }); }
+    if (a === "note") { await secLog(env, "agent", { by: str(b.by, 20), text: str(b.text, 600) }); return json({ ok: true }); }
+    return json({ error: "أمر غير معروف" }, 400);
+  }
+  return json({ error: "غير موجود" }, 404);
+}
+/* أوامر الإدارة: بتشتغل من دومين الأدمن بس */
+const ADMIN_ROUTES = new Set(["login", "logout", "admin-errs", "admin-assign", "admin-wipe", "archive", "admin-maplink", "admin-review", "admin-trial-end", "admin-false-report", "admin-cancel", "restore", "ai", "phone-request", "consents", "state", "doc"]);
+export async function onRequest(ctx) {
+  const { request, env, params } = ctx;
+  const parts = Array.isArray(params.path) ? params.path : [params.path].filter(Boolean);
+  const [route, sub] = parts;
+  const url = new URL(request.url), ip = ipOf(request), method = request.method;
+  if (route === "health") {
+    let db = false; try { db = Boolean(env.DB && (await env.DB.prepare("SELECT 1 AS x").first())); } catch (e) {}
+    return json({ ok: db, db, ver: "v107", at: Date.now() }, db ? 200 : 503);
+  }
+  if (!env.DB) return handle(ctx);
+  const isAdm = ADMIN_ROUTES.has(route) || (route === "map-usage" && method === "GET") || route === "admin-guard";
+  if (isAdm && !adminHost(url.hostname, env)) return json({ error: "غير موجود" }, 404);
+  if (route !== "wa" && route !== "guard" && (await ipBlocked(env, ip))) return json({ error: "اتقفل الدخول مؤقتاً من الجهاز ده — جرّب بعد شوية" }, 429);
+  if (route === "login" && (await adminLocked(env))) {
+    await secLog(env, "adminlock-hit", { ip });
+    return json({ error: "دخول الإدارة مقفول مؤقتاً للحماية — جرّب بعد ساعة" }, 423);
+  }
+  const res = await handle(ctx);
+  const st = res.status, bg = (p) => { try { ctx.waitUntil ? ctx.waitUntil(p) : null; } catch (e) {} };
+  if (route === "login" && st === 401) bg(guardHit(env, "adminfail", ip));
+  else if (route === "driver" && sub === "login" && (st === 401 || st === 429)) bg(guardHit(env, "drvfail", ip));
+  else if (st === 429) bg(guardHit(env, "ratelimit", ip));
+  if (st >= 500 && st !== 503) bg(guardHit(env, "servererr", "", { msg: route + (sub ? "/" + sub : "") }));
+  if (route === "err" && method === "POST") bg(guardHit(env, "clienterr", ""));
+  if (isAdm && method !== "GET" && st < 400 && route !== "login") bg(audit(env, request, route, sub, parts[2]));
+  return res;
+}
+async function handle({ request, env, params }) {
   const parts = Array.isArray(params.path) ? params.path : [params.path].filter(Boolean);
   const [route, sub, third] = parts;
   const method = request.method;
@@ -1271,6 +1414,7 @@ export async function onRequest({ request, env, params }) {
 
     /* سعر المشوار قبل الطلب — نفس حساب «اطلب» بالظبط (أقرب طريق، ولو مارديش خط مستقيم × ١٫٣) علشان السعر اللي الراكب يشوفه هو اللي يتحسب */
     if (route === "fare-quote" && method === "GET") {
+      if (!(await rateOk(env, "fq-" + ipOf(request), 40))) return json({ error: "استنى شوية وجرّب تاني" }, 429);
       const q = url.searchParams, num = (v) => (v != null && v !== "" && isFinite(+v) ? +v : null);
       const a = { lat: num(q.get("alat")), lng: num(q.get("alng")) }, z = { lat: num(q.get("blat")), lng: num(q.get("blng")) };
       if (!hasXY(a) || !hasXY(z)) return json({ error: "مكان ناقص" }, 400);
@@ -1290,6 +1434,7 @@ export async function onRequest({ request, env, params }) {
     }
     /* عدّاد فتح الخريطة (للتكلفة) */
     if (route === "map-usage" && method === "POST") {
+      if (!(await rateOk(env, "mu-" + ipOf(request), 20))) return json({ ok: true });
       const b = await parseBody(request), f = { google: "gLoad", stadia: "sLoad", osm: "oLoad" }[b && b.p];
       if (f) await usageBump(env, f);
       if (b && b.fail) await usageBump(env, "gLoadFail");
@@ -1302,6 +1447,7 @@ export async function onRequest({ request, env, params }) {
     }
     /* المسار على الطرق للرسم على الخريطة */
     if (route === "route" && method === "GET") {
+      if (!(await rateOk(env, "rt-" + ipOf(request), 60))) return json({ error: "استنى شوية وجرّب تاني" }, 429);
       const q = url.searchParams, num = (v) => (v != null && v !== "" && isFinite(+v) ? +v : null);
       const a = { lat: num(q.get("alat")), lng: num(q.get("alng")) }, z = { lat: num(q.get("blat")), lng: num(q.get("blng")) };
       if (!hasXY(a) || !hasXY(z)) return json({ error: "مكان ناقص" }, 400);
@@ -1883,11 +2029,14 @@ export async function onRequest({ request, env, params }) {
       const phone = digits(b.phone).slice(0, 15);
       const note = str(b.note, 600);
       if (phone.length < 9 || !note) return json({ error: "اكتب رقمك والمشكلة" }, 400);
+      /* من غير جلسة مؤكدة: ٥ رسايل في الساعة بالكتير من نفس الجهاز، والبلاغ بيتعلّم «رقم مش متأكد منه» */
+      const verified = !(verifyOn(env) && (await needSession(request, env, phone, "rider")));
+      if (!verified && (await secCount(env, "support:" + ipOf(request), 60)) > 5) return json({ error: "رسايل كتير — جرّب بعد ساعة" }, 429);
       const kinds = ["overcharge", "late", "behaviour", "lost", "suggest", "other"];
       const rid = uid();
       await putDoc(env, "reports", rid, {
         id: rid, requestId: str(b.requestId, 40), driverId: "", riderName: str(b.name, 60), riderPhone: phone,
-        kind: kinds.includes(b.kind) ? b.kind : "other", asked: 0, fare: 0, note, status: "open", createdAt: Date.now(), source: "support",
+        kind: kinds.includes(b.kind) ? b.kind : "other", asked: 0, fare: 0, note, status: "open", createdAt: Date.now(), source: "support", unverified: !verified,
       });
       return json({ ok: true });
     }
@@ -1896,6 +2045,8 @@ export async function onRequest({ request, env, params }) {
     if (route === "wallet" && method === "GET") {
       const phone = digits(url.searchParams.get("phone"));
       if (phone.length < 9) return json({ error: "رقم غير صحيح" }, 400);
+      /* بيانات الرصيد لصاحب الرقم بس (جلسة مؤكدة) — غير كده بنرجّع «مجاني» من غير مانعمل أي سجل */
+      if (verifyOn(env) && (await needSession(request, env, phone, "rider"))) return json({ state: "free", owed: 0 });
       const w = await riderWallet(env, phone, await subCfg(env));
       const owed = Math.max(0, Math.round(+(w.doc && w.doc.owed) || 0));
       return json(w.state === "low" || w.state === "stopped" ? { state: w.state, credit: w.credit, fee: w.fee, owed } : { state: "free", owed });
@@ -1905,6 +2056,7 @@ export async function onRequest({ request, env, params }) {
     if (route === "referral" && method === "GET") {
       const phone = digits(url.searchParams.get("phone"));
       if (phone.length < 9) return json({ error: "رقم غير صحيح" }, 400);
+      if (verifyOn(env) && (await needSession(request, env, phone, "rider"))) return json({ code: refCode(phone), joined: 0, credit: 0, off: REF_OFF });
       const { requests } = await readDocs(env, ["requests"]);
       const invited = requests.filter((r) => r.refBy === phone);
       const earned = invited.filter((r) => r.status === "done").length;
@@ -2762,8 +2914,15 @@ export async function onRequest({ request, env, params }) {
       if (method === "POST") return setErr(env, await parseBody(request));
     }
 
+    /* وكلاء المتابعة (AGENT_KEY): ملخص الأمان + أوامر مؤقتة + إرسال تنبيه تيليجرام */
+    if (route === "guard") {
+      if (!agentOk(request, env)) return json({ error: "غير مصرّح" }, 401);
+      return guardApi(request, env, url);
+    }
     if (!(await adminOk(request, env))) return json({ error: "غير مصرّح" }, 401);
 
+    /* الإدارة: نفس لوحة الحارس (للبورتال) + تجربة تنبيه تيليجرام */
+    if (route === "admin-guard") return guardApi(request, env, url);
     /* الإدارة: سجل الأخطاء */
     if (route === "admin-errs") {
       if (method === "GET") return json({ errs: await listErrs(env) });
@@ -3086,7 +3245,7 @@ ${JSON.stringify(stats)}`;
     return json({ error: "غير موجود" }, 404);
   } catch (err) {
     const big = err && err.message === "too_large";
-    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v106" });
+    if (!big) await logErr(env, { where: "server", msg: (err && err.message) || String(err), stack: err && err.stack, page: method + " /api/" + parts.join("/").replace(/\/[A-Za-z0-9_-]{8,}/g, "/:id"), ver: "v107" });
     return json({ error: big ? "حجم البيانات كبير" : "خطأ في الخادم" }, big ? 413 : 500);
   }
 }
